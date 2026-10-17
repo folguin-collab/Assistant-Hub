@@ -5,7 +5,14 @@ import { getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc, addDoc, u
 import { Calendar, Clock, User, UserPlus, Trash2, CheckCircle, XCircle, AlertCircle, Shield, Stethoscope, Users, Pencil, FileText } from 'lucide-react';
 
 // --- FIREBASE INITIALIZATION ---
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const firebaseConfig = {
+  apiKey: "AIzaSyDXrbo8NzD1PxsHlFivP8_bvTBuUdieCMU",
+  authDomain: "assistanthub-15619.firebaseapp.com",
+  projectId: "assistanthub-15619",
+  storageBucket: "assistanthub-15619.firebasestorage.app",
+  messagingSenderId: "960583553018",
+  appId: "1:960583553018:web:fbc3789bf0d09957ac5e43"
+};
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
