@@ -50,9 +50,10 @@ const getDayOfWeek = (dateString) => {
 };
 
 const getSlotsForDuration = (startTime, durationMinutes) => {
+  if (!startTime) return [];
   const slots = [];
   let [h, m] = startTime.split(':').map(Number);
-  const totalSlots = durationMinutes / 15;
+  const totalSlots = Math.ceil(durationMinutes / 15);
   for (let i = 0; i < totalSlots; i++) {
     if (h >= 24) break;
     const hour = h.toString().padStart(2, '0');
@@ -360,7 +361,7 @@ const AdminView = ({ assistants, doctors }) => {
 // 2. DOCTOR VIEW
 const DoctorView = ({ assistants, bookings, doctors }) => {
   const [selectedDate, setSelectedDate] = useState(getTodayString());
-  const [doctorId, setDoctorId] = useState(''); // Ahora usamos ID seleccionado
+  const [doctorId, setDoctorId] = useState(''); 
   const [patientName, setPatientName] = useState('');
   const [duration, setDuration] = useState(60); 
   const [comments, setComments] = useState('');
@@ -411,7 +412,7 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
     const assignedAssistant = availableAssistants[randomIndex];
     const groupId = Date.now().toString() + Math.random().toString(36).substr(2, 5);
 
-    // 4. Guardar todos los bloques en Firebase
+    // 4. Guardar todos los bloques en Firebase (Para creación manual guarda varios docs)
     try {
       const collRef = collection(db, 'artifacts', appId, 'public', 'data', 'bookings');
       const promises = requiredSlots.map((slot, index) => 
@@ -539,7 +540,7 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
                    const cardColor = "bg-amber-100 border-amber-200 text-amber-900";
                     
                     return (
-                      <div key={mb.id} className={`${cardColor} border p-2 rounded-lg text-sm shadow-sm`}>
+                      <div key={mb.virtualId || mb.id} className={`${cardColor} border p-2 rounded-lg text-sm shadow-sm`}>
                          <div className="flex justify-between items-center mb-1">
                            <span className="font-semibold flex items-center gap-1">
                              <CheckCircle size={14}/> {mb.assistantName}
@@ -779,7 +780,9 @@ export default function App() {
     // Listen to Bookings
     const bookRef = collection(db, 'artifacts', appId, 'public', 'data', 'bookings');
     const unsubBookings = onSnapshot(bookRef, (snapshot) => {
-      const bookData = snapshot.docs.map(doc => {
+      let expandedBookings = [];
+      
+      snapshot.docs.forEach(doc => {
         const data = doc.data();
         let fechaCorregida = data.date;
         
@@ -792,9 +795,30 @@ export default function App() {
           fechaCorregida = data.date.split('T')[0];
         }
 
-        return { id: doc.id, ...data, date: fechaCorregida };
+        // Parsear duración asegurando que sea un número (n8n a veces envía string "60")
+        const durationNum = Number(data.duration) || 15;
+        const baseBooking = { id: doc.id, ...data, date: fechaCorregida, duration: durationNum };
+        
+        // Si la cita tiene una hora de inicio, calculamos cuántos bloques de 15m necesita
+        if (baseBooking.time) {
+          const slotsCovered = getSlotsForDuration(baseBooking.time, durationNum);
+          
+          slotsCovered.forEach((slotTime, index) => {
+            expandedBookings.push({
+              ...baseBooking,
+              time: slotTime,
+              // Solo el primer bloque muestra el botón de liberar
+              isFirstSlot: index === 0,
+              // ID virtual para evitar advertencias de "duplicate keys" en React
+              virtualId: `${doc.id}_${index}`
+            });
+          });
+        } else {
+          expandedBookings.push(baseBooking);
+        }
       });
-      setBookings(bookData);
+      
+      setBookings(expandedBookings);
       setLoading(false);
     }, (error) => console.error(error));
 
