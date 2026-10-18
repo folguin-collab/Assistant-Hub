@@ -782,9 +782,25 @@ export default function App() {
     }, (error) => console.error(error));
 
     // Listen to Bookings
+    // Listen to Bookings
     const bookRef = collection(db, 'artifacts', appId, 'public', 'data', 'bookings');
     const unsubBookings = onSnapshot(bookRef, (snapshot) => {
-      const bookData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      const bookData = snapshot.docs.map(doc => {
+        const data = doc.data();
+        let fechaCorregida = data.date;
+        
+        // Si Firebase lo guardó como Timestamp (desde n8n), extraemos la fecha "YYYY-MM-DD"
+        if (data.date && typeof data.date !== 'string' && data.date.toDate) {
+          fechaCorregida = data.date.toDate().toISOString().split('T')[0];
+        } 
+        // Si llegó con formato largo y una 'T' intermedia
+        else if (typeof data.date === 'string' && data.date.includes('T')) {
+          fechaCorregida = data.date.split('T')[0];
+        }
+
+        return { id: doc.id, ...data, date: fechaCorregida };
+      });
+      
       setBookings(bookData);
       setLoading(false);
     }, (error) => console.error(error));
