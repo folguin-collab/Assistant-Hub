@@ -510,9 +510,8 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
             const availableCount = workingAssistants.length - slotBookings.length;
             
             // Todas las reservas de ESTE doctor en este bloque
-            const myBookingsInSlot = selectedDoctorObj 
-               ? slotBookings.filter(b => b.doctorId === selectedDoctorObj.id || b.doctorName === selectedDoctorObj.name)
-               : [];
+            // Renderiza todas las reservas del bloque independientemente de si el doctor fue creado manualmente en Firestore
+const myBookingsInSlot = slotBookings;
 
             let statusColor = "bg-slate-50 border-slate-200";
             
@@ -541,8 +540,8 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
 
                 <div className="space-y-2 mb-3">
                   {slotBookings.map(mb => {
-                    const isMyBooking = selectedDoctorObj && (mb.doctorId === selectedDoctorObj.id || mb.doctorName === selectedDoctorObj.name);
-                    const cardColor = isMyBooking ? "bg-green-100 border-green-200 text-green-900" : "bg-amber-100 border-amber-200 text-amber-900";
+                   const isMyBooking = true; // Habilita la lectura universal y la cancelación/liberación directa de bloques
+                  const cardColor = "bg-amber-100 border-amber-200 text-amber-900";
                     
                     return (
                       <div key={mb.id} className={`${cardColor} border p-2 rounded-lg text-sm shadow-sm`}>
