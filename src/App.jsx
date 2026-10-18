@@ -412,26 +412,23 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
     const assignedAssistant = availableAssistants[randomIndex];
     const groupId = Date.now().toString() + Math.random().toString(36).substr(2, 5);
 
-    // 4. Guardar todos los bloques en Firebase (Para creación manual guarda varios docs)
+    // 4. Guardar SOLO UN bloque en Firebase (La app se encarga de expandirlo visualmente)
     try {
       const collRef = collection(db, 'artifacts', appId, 'public', 'data', 'bookings');
-      const promises = requiredSlots.map((slot, index) => 
-        addDoc(collRef, {
-          groupId,
-          date: selectedDate,
-          time: slot,
-          assistantId: assignedAssistant.id,
-          assistantName: assignedAssistant.name,
-          doctorId: 'manual',
-          doctorName: doctorId,
-          patientName: patientName,
-          duration: duration,
-          comments: comments.trim(),
-          isFirstSlot: index === 0,
-          createdAt: new Date().toISOString()
-        })
-      );
-      await Promise.all(promises);
+      await addDoc(collRef, {
+        groupId,
+        date: selectedDate,
+        time: timeSlot,
+        assistantId: assignedAssistant.id,
+        assistantName: assignedAssistant.name,
+        doctorId: 'manual',
+        doctorName: doctorId,
+        patientName: patientName,
+        duration: duration,
+        comments: comments.trim(),
+        isFirstSlot: true,
+        createdAt: new Date().toISOString()
+      });
       setPatientName('');
       setComments('');
     } catch (err) {
@@ -475,6 +472,7 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
   const handleCancel = async (booking) => {
     try {
       if (booking.groupId && booking.assistantId !== 'pendiente') {
+         // Para retrocompatibilidad con las pruebas viejas eliminamos todo el grupo
          const groupBookings = bookings.filter(b => b.groupId === booking.groupId);
          const promises = groupBookings.map(b => deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', b.id)));
          await Promise.all(promises);
