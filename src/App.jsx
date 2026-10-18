@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc, addDoc, updateDoc } from 'firebase/firestore';
@@ -439,9 +439,42 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
     }
   };
 
+  const handleAssignToExisting = async (booking) => {
+      const requiredSlots = getSlotsForDuration(booking.time, booking.duration);
+      const dayOfWeek = getDayOfWeek(booking.date);
+
+      const availableAssistants = assistants.filter(ast => {
+         const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek]));
+         if (!workingAll) return false;
+
+         const bookedInAny = requiredSlots.some(slot =>
+            bookings.some(b => b.date === booking.date && b.time === slot && b.assistantId === ast.id && b.id !== booking.id)
+         );
+         return !bookedInAny;
+      });
+
+      if (availableAssistants.length === 0) {
+         setBookingError(`⚠️ No hay asistentes disponibles a las ${booking.time} por ${booking.duration}m.`);
+         setTimeout(() => setBookingError(''), 4000);
+         return;
+      }
+
+      const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
+
+      try {
+        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id);
+        await updateDoc(docRef, {
+          assistantId: assignedAssistant.id,
+          assistantName: assignedAssistant.name
+        });
+      } catch (err) {
+        console.error("Assign error:", err);
+      }
+  };
+
   const handleCancel = async (booking) => {
     try {
-      if (booking.groupId) {
+      if (booking.groupId && booking.assistantId !== 'pendiente') {
          const groupBookings = bookings.filter(b => b.groupId === booking.groupId);
          const promises = groupBookings.map(b => deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', b.id)));
          await Promise.all(promises);
@@ -537,13 +570,14 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
                 <div className="space-y-2 mb-3">
                   {myBookingsInSlot.map(mb => {
                    const isMyBooking = true; // Habilita la lectura universal y la cancelación/liberación directa de bloques
-                   const cardColor = "bg-amber-100 border-amber-200 text-amber-900";
+                   const isUnassigned = mb.assistantId === 'pendiente';
+                   const cardColor = isUnassigned ? "bg-red-50 border-red-200 text-red-900" : "bg-amber-100 border-amber-200 text-amber-900";
                     
                     return (
                       <div key={mb.virtualId || mb.id} className={`${cardColor} border p-2 rounded-lg text-sm shadow-sm`}>
                          <div className="flex justify-between items-center mb-1">
                            <span className="font-semibold flex items-center gap-1">
-                             <CheckCircle size={14}/> {mb.assistantName}
+                             {isUnassigned ? <AlertCircle size={14}/> : <CheckCircle size={14}/>} {mb.assistantName}
                            </span>
                          </div>
                          <div className="text-xs mb-1 font-medium text-slate-800">
@@ -552,13 +586,20 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
                          <div className="text-xs mb-1 opacity-90">Px: {mb.patientName}</div>
                          {mb.comments && <div className="text-xs mb-2 opacity-80 italic">Nota: {mb.comments}</div>}
                          
-                         {isMyBooking && mb.isFirstSlot !== false && (
+                         {isUnassigned && mb.isFirstSlot !== false && (
+                           <button onClick={() => handleAssignToExisting(mb)} className="w-full py-2 mt-2 bg-blue-600 text-white rounded text-xs font-semibold hover:bg-blue-700 transition-colors shadow-sm">
+                             Asignar Asistente Disponible
+                           </button>
+                         )}
+
+                         {!isUnassigned && isMyBooking && mb.isFirstSlot !== false && (
                            <button onClick={() => handleCancel(mb)} className="w-full py-1.5 mt-1 bg-white/80 text-red-600 rounded text-xs font-semibold hover:bg-white transition-colors shadow-sm">
                              Liberar Bloque ({mb.duration ? `${mb.duration}m` : '15m'})
                            </button>
                          )}
+
                          {mb.isFirstSlot === false && (
-                            <div className={`text-center text-[10px] mt-1 opacity-60 font-medium ${isMyBooking ? 'text-green-700' : 'text-amber-700'}`}>
+                            <div className={`text-center text-[10px] mt-1 opacity-60 font-medium ${isUnassigned ? 'text-red-700' : 'text-amber-700'}`}>
                               Bloque en curso
                             </div>
                          )}
@@ -568,8 +609,8 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
                 </div>
                 
                 {availableCount > 0 && (
-                  <button onClick={() => handleBook(slot)} className="w-full py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors shadow-sm mt-auto">
-                    Asignar Aleatoriamente
+                  <button onClick={() => handleBook(slot)} className="w-full py-2 bg-slate-200 text-slate-700 rounded-lg text-sm font-medium hover:bg-slate-300 transition-colors shadow-sm mt-auto">
+                    Agendar Manualmente
                   </button>
                 )}
               </div>
@@ -735,6 +776,7 @@ export default function App() {
   const [doctors, setDoctors] = useState([]);
   const [bookings, setBookings] = useState([]);
   const [loading, setLoading] = useState(true);
+  const processingIds = useRef(new Set());
 
   // Initialize Auth
   useEffect(() => {
@@ -786,30 +828,22 @@ export default function App() {
         const data = doc.data();
         let fechaCorregida = data.date;
         
-        // Si Firebase lo guardó como Timestamp (desde n8n), extraemos la fecha "YYYY-MM-DD"
         if (data.date && typeof data.date !== 'string' && data.date.toDate) {
           fechaCorregida = data.date.toDate().toISOString().split('T')[0];
-        } 
-        // Si llegó con formato largo y una 'T' intermedia
-        else if (typeof data.date === 'string' && data.date.includes('T')) {
+        } else if (typeof data.date === 'string' && data.date.includes('T')) {
           fechaCorregida = data.date.split('T')[0];
         }
 
-        // Parsear duración asegurando que sea un número (n8n a veces envía string "60")
         const durationNum = Number(data.duration) || 15;
         const baseBooking = { id: doc.id, ...data, date: fechaCorregida, duration: durationNum };
         
-        // Si la cita tiene una hora de inicio, calculamos cuántos bloques de 15m necesita
         if (baseBooking.time) {
           const slotsCovered = getSlotsForDuration(baseBooking.time, durationNum);
-          
           slotsCovered.forEach((slotTime, index) => {
             expandedBookings.push({
               ...baseBooking,
               time: slotTime,
-              // Solo el primer bloque muestra el botón de liberar
               isFirstSlot: index === 0,
-              // ID virtual para evitar advertencias de "duplicate keys" en React
               virtualId: `${doc.id}_${index}`
             });
           });
@@ -828,6 +862,54 @@ export default function App() {
       unsubBookings();
     };
   }, [user]);
+
+  // AUTO-ASIGNACIÓN INTELIGENTE
+  useEffect(() => {
+    if (assistants.length === 0 || bookings.length === 0) return;
+
+    // Buscamos citas pendientes que sean el documento principal (isFirstSlot !== false)
+    const unassignedBookings = bookings.filter(b => b.assistantId === 'pendiente' && b.isFirstSlot !== false);
+
+    unassignedBookings.forEach(async (booking) => {
+      // Evitar procesar el mismo documento múltiples veces simultáneamente
+      if (processingIds.current.has(booking.id)) return;
+      processingIds.current.add(booking.id);
+
+      const requiredSlots = getSlotsForDuration(booking.time, booking.duration);
+      const dayOfWeek = getDayOfWeek(booking.date);
+
+      const availableAssistants = assistants.filter(ast => {
+         const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek]));
+         if (!workingAll) return false;
+
+         const bookedInAny = requiredSlots.some(slot =>
+            bookings.some(b => b.date === booking.date && b.time === slot && b.assistantId === ast.id && b.id !== booking.id)
+         );
+         return !bookedInAny;
+      });
+
+      if (availableAssistants.length > 0) {
+         // Asignar aleatoriamente entre las que están libres
+         const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
+         try {
+           const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id);
+           await updateDoc(docRef, {
+             assistantId: assignedAssistant.id,
+             assistantName: assignedAssistant.name
+           });
+           // Una vez actualizado, Firebase enviará otro snapshot y ya no será 'pendiente'
+         } catch (err) {
+           console.error("Auto-assign error:", err);
+           processingIds.current.delete(booking.id); // Permite reintentar si falla
+         }
+      } else {
+         // Nadie disponible, liberar el candado después de un rato para reintentos si alguien se libera
+         setTimeout(() => {
+           processingIds.current.delete(booking.id);
+         }, 10000);
+      }
+    });
+  }, [bookings, assistants]);
 
   if (loading) {
     return <div className="min-h-screen bg-slate-50 flex items-center justify-center text-blue-600 font-medium">Cargando Sistema...</div>;
