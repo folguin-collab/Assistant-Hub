@@ -369,7 +369,7 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
 
   const handleBook = async (timeSlot) => {
     if (!doctorId) {
-       setBookingError('⚠️ Selecciona un Doctor(a) de la lista.');
+       setBookingError('⚠️ Ingresa el nombre del Doctor(a).');
        setTimeout(() => setBookingError(''), 3000);
        return;
     }
@@ -406,10 +406,6 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
        return;
     }
 
-    // 2. Obtener el nombre del doctor seleccionado
-    const selectedDoctor = doctors.find(d => d.id === doctorId);
-    const docName = selectedDoctor ? selectedDoctor.name : 'Doctor(a)';
-
     // 3. Asignar aleatoriamente
     const randomIndex = Math.floor(Math.random() * availableAssistants.length);
     const assignedAssistant = availableAssistants[randomIndex];
@@ -425,8 +421,8 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
           time: slot,
           assistantId: assignedAssistant.id,
           assistantName: assignedAssistant.name,
-          doctorId: doctorId,
-          doctorName: docName,
+          doctorId: 'manual',
+          doctorName: doctorId,
           patientName: patientName,
           duration: duration,
           comments: comments.trim(),
@@ -458,7 +454,6 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
   };
 
   const dayOfWeek = getDayOfWeek(selectedDate);
-  const selectedDoctorObj = doctors.find(d => d.id === doctorId);
 
   return (
     <div className="space-y-6">
@@ -466,12 +461,13 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
         <div className="flex flex-col md:flex-row gap-4 items-end">
           <div className="flex-1 w-full">
             <label className="block text-sm font-medium text-slate-600 mb-1">Doctor(a)</label>
-            <select value={doctorId} onChange={(e) => setDoctorId(e.target.value)} className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white">
-              <option value="">Seleccione Doctor(a)...</option>
-              {doctors.map(d => (
-                <option key={d.id} value={d.id}>{d.name}</option>
-              ))}
-            </select>
+            <input 
+              type="text" 
+              value={doctorId} 
+              onChange={(e) => setDoctorId(e.target.value)} 
+              placeholder="Ej. Dr. Pérez (o llega por Dentalink)" 
+              className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white" 
+            />
           </div>
           <div className="flex-1 w-full">
             <label className="block text-sm font-medium text-slate-600 mb-1">Fecha de Consulta</label>
@@ -509,9 +505,8 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
             const slotBookings = bookings.filter(b => b.date === selectedDate && b.time === slot);
             const availableCount = workingAssistants.length - slotBookings.length;
             
-            // Todas las reservas de ESTE doctor en este bloque
-            // Renderiza todas las reservas del bloque independientemente de si el doctor fue creado manualmente en Firestore
-const myBookingsInSlot = slotBookings;
+            // Todas las reservas en este bloque (ya no filtramos por doctor)
+            const myBookingsInSlot = slotBookings;
 
             let statusColor = "bg-slate-50 border-slate-200";
             
@@ -539,9 +534,9 @@ const myBookingsInSlot = slotBookings;
                 </div>
 
                 <div className="space-y-2 mb-3">
-                  {slotBookings.map(mb => {
+                  {myBookingsInSlot.map(mb => {
                    const isMyBooking = true; // Habilita la lectura universal y la cancelación/liberación directa de bloques
-                  const cardColor = "bg-amber-100 border-amber-200 text-amber-900";
+                   const cardColor = "bg-amber-100 border-amber-200 text-amber-900";
                     
                     return (
                       <div key={mb.id} className={`${cardColor} border p-2 rounded-lg text-sm shadow-sm`}>
@@ -782,7 +777,6 @@ export default function App() {
     }, (error) => console.error(error));
 
     // Listen to Bookings
-    // Listen to Bookings
     const bookRef = collection(db, 'artifacts', appId, 'public', 'data', 'bookings');
     const unsubBookings = onSnapshot(bookRef, (snapshot) => {
       const bookData = snapshot.docs.map(doc => {
@@ -800,7 +794,6 @@ export default function App() {
 
         return { id: doc.id, ...data, date: fechaCorregida };
       });
-      
       setBookings(bookData);
       setLoading(false);
     }, (error) => console.error(error));
