@@ -714,13 +714,13 @@ const AssistantView = ({ assistants, bookings }) => {
              <Calendar size={20} className="text-blue-600" />
              Agenda General - {DAYS_OF_WEEK[dayOfWeek]}
            </h3>
-           <div className="overflow-x-auto">
-             <table className="w-full min-w-max border-collapse">
+           <div className="overflow-auto max-h-[70vh]">
+             <table className="w-full min-w-max border-collapse relative">
                <thead>
                  <tr>
-                   <th className="p-3 bg-slate-50 border-b border-slate-200 text-left sticky left-0 z-10 shadow-[1px_0_0_0_#e2e8f0] font-bold text-slate-700 w-24">Hora</th>
+                   <th className="p-3 bg-slate-100 border-b border-slate-200 text-left sticky left-0 top-0 z-30 shadow-[1px_1px_0_0_#e2e8f0] font-bold text-slate-700 w-24">Hora</th>
                    {activeAssistants.map(ast => (
-                     <th key={ast.id} className="p-3 bg-slate-50 border-b border-slate-200 border-l border-slate-200 text-center font-semibold text-slate-700 min-w-[160px]">
+                     <th key={ast.id} className="p-3 bg-slate-100 border-b border-slate-200 border-l border-slate-200 text-center font-semibold text-slate-700 min-w-[160px] sticky top-0 z-20 shadow-[0_1px_0_0_#e2e8f0]">
                        {ast.name}
                      </th>
                    ))}
