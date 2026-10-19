@@ -4,6 +4,11 @@ import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged }
 import { getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc, addDoc, updateDoc } from 'firebase/firestore';
 import { Calendar, Clock, User, UserPlus, Trash2, CheckCircle, XCircle, AlertCircle, Shield, Stethoscope, Users, Pencil, FileText } from 'lucide-react';
 
+// --- CONFIGURACIÓN DE INTEGRACIÓN ---
+const N8N_WEBHOOK_BLOQUEOS_URL = "https://automatizaciones-n8n.ani4cn.easypanel.host/webhook-test/181d9cb9-3a71-4e3d-85ce-9427981cab6b"; // <-- ¡PEGA AQUÍ LA URL DE TU NUEVO WEBHOOK DE N8N!
+const ID_PACIENTE_BLOQUEO = 8037;
+const ID_ESTADO_BLOQUEO = 24;
+
 // --- FIREBASE INITIALIZATION ---
 const firebaseConfig = {
   apiKey: "AIzaSyDXrbo8NzD1PxsHlFivP8_bvTBuUdieCMU",
@@ -23,7 +28,7 @@ const generateTimeSlots = (startHour = 8, endHour = 20) => {
   const slots = [];
   for (let h = startHour; h <= endHour; h++) {
     for (let m = 0; m < 60; m += 15) {
-      if (h === endHour && m > 0) break; // End at exactly endHour:00
+      if (h === endHour && m > 0) break; 
       const hour = h.toString().padStart(2, '0');
       const min = m.toString().padStart(2, '0');
       slots.push(`${hour}:${min}`);
@@ -45,7 +50,6 @@ const isTimeInAnyBlock = (time, blocks) => {
 };
 
 const getDayOfWeek = (dateString) => {
-  // Use midday to avoid timezone shifting the day
   return new Date(dateString + 'T12:00:00').getDay();
 };
 
@@ -65,14 +69,48 @@ const getSlotsForDuration = (startTime, durationMinutes) => {
   return slots;
 };
 
+// Función para calcular hora final (H:i) sumando minutos a una hora inicial
+const calculateEndTime = (startTime, durationMinutes) => {
+    let [h, m] = startTime.split(':').map(Number);
+    m += durationMinutes;
+    h += Math.floor(m / 60);
+    m = m % 60;
+    return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+};
+
+// Enviar Bloqueo a n8n
+const notifyDentalinkBlock = async (booking, assistant) => {
+    if (!N8N_WEBHOOK_BLOQUEOS_URL || !assistant.dentalinkId) return;
+    try {
+        await fetch(N8N_WEBHOOK_BLOQUEOS_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                id_paciente: ID_PACIENTE_BLOQUEO,
+                id_estado: ID_ESTADO_BLOQUEO,
+                id_dentista: assistant.dentalinkId,
+                fecha: booking.date,
+                hora_inicio: booking.time,
+                hora_fin: calculateEndTime(booking.time, booking.duration),
+                duracion: booking.duration,
+                comentarios: `Apoyando a: ${booking.doctorName} (Px: ${booking.patientName})`
+            })
+        });
+    } catch (e) {
+        console.error("Error al notificar bloqueo a n8n:", e);
+    }
+};
+
+
 // --- COMPONENTS ---
 
 // 1. ADMIN VIEW
 const AdminView = ({ assistants, doctors }) => {
-  const [activeTab, setActiveTab] = useState('assistants'); // 'assistants' o 'doctors'
+  const [activeTab, setActiveTab] = useState('assistants'); 
   
   // Estados para Asistentes
   const [name, setName] = useState('');
+  const [dentalinkId, setDentalinkId] = useState(''); // NUEVO: ID Dentalink de la asistente
   const defaultSchedule = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [], 6: [] };
   const [schedule, setSchedule] = useState(defaultSchedule);
   const [editingId, setEditingId] = useState(null);
@@ -105,13 +143,14 @@ const AdminView = ({ assistants, doctors }) => {
     try {
       if (editingId) {
         const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'assistants', editingId);
-        await updateDoc(docRef, { name, schedule });
+        await updateDoc(docRef, { name, dentalinkId, schedule });
         setEditingId(null);
       } else {
         const collRef = collection(db, 'artifacts', appId, 'public', 'data', 'assistants');
-        await addDoc(collRef, { name, schedule });
+        await addDoc(collRef, { name, dentalinkId, schedule });
       }
       setName('');
+      setDentalinkId('');
       setSchedule(defaultSchedule);
     } catch (err) {
       console.error("Error saving assistant:", err);
@@ -120,6 +159,7 @@ const AdminView = ({ assistants, doctors }) => {
 
   const handleEdit = (ast) => {
     setName(ast.name);
+    setDentalinkId(ast.dentalinkId || '');
     setSchedule(ast.schedule || defaultSchedule);
     setEditingId(ast.id);
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -127,6 +167,7 @@ const AdminView = ({ assistants, doctors }) => {
 
   const handleCancelEdit = () => {
     setName('');
+    setDentalinkId('');
     setSchedule(defaultSchedule);
     setEditingId(null);
   };
@@ -173,7 +214,6 @@ const AdminView = ({ assistants, doctors }) => {
 
   return (
     <div className="space-y-6">
-      {/* Pestañas de Navegación Admin */}
       <div className="flex gap-2 bg-white p-2 rounded-xl shadow-sm border border-slate-100">
         <button onClick={() => setActiveTab('assistants')} className={`flex-1 py-2 px-4 rounded-lg font-medium transition-colors flex items-center justify-center gap-2 ${activeTab === 'assistants' ? 'bg-blue-600 text-white' : 'bg-transparent text-slate-600 hover:bg-slate-50'}`}>
           <UserPlus size={18} /> Asistentes
@@ -191,9 +231,15 @@ const AdminView = ({ assistants, doctors }) => {
               Agregar Nueva Asistente y Horarios
             </h3>
             
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-slate-600 mb-1">Nombre</label>
-              <input type="text" value={name} onChange={(e) => setName(e.target.value)} className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Ej. María Pérez" />
+            <div className="flex flex-col md:flex-row gap-4 mb-4">
+              <div className="flex-1">
+                <label className="block text-sm font-medium text-slate-600 mb-1">Nombre</label>
+                <input type="text" value={name} onChange={(e) => setName(e.target.value)} className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Ej. María Pérez" />
+              </div>
+              <div className="md:w-1/3">
+                <label className="block text-sm font-medium text-slate-600 mb-1" title="ID del perfil de la Asistente en Dentalink">ID en Dentalink</label>
+                <input type="text" value={dentalinkId} onChange={(e) => setDentalinkId(e.target.value)} className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Ej. 12" />
+              </div>
             </div>
 
             <div className="bg-slate-50 p-4 rounded-lg border border-slate-200 mb-4">
@@ -269,8 +315,11 @@ const AdminView = ({ assistants, doctors }) => {
                         {ast.name.charAt(0)}
                       </div>
                       <div>
-                        <p className="font-medium text-slate-800 mb-1">{ast.name}</p>
-                        <div className="text-xs text-slate-500 space-y-1">
+                        <p className="font-medium text-slate-800 mb-1">
+                          {ast.name} 
+                          {ast.dentalinkId && <span className="ml-2 text-xs bg-slate-200 text-slate-600 px-2 py-0.5 rounded-full">ID DL: {ast.dentalinkId}</span>}
+                        </p>
+                        <div className="text-xs text-slate-500 space-y-1 mt-1">
                           {DAYS_OF_WEEK.map((day, i) => {
                             const blocks = ast.schedule?.[i];
                             if (!blocks || blocks.length === 0) return null;
@@ -299,6 +348,7 @@ const AdminView = ({ assistants, doctors }) => {
 
       {activeTab === 'doctors' && (
         <>
+          {/* Doctores code stays the same... */}
           <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
             <h3 className="text-lg font-semibold text-slate-800 mb-4 flex items-center gap-2">
               <Stethoscope size={20} className="text-blue-600" />
@@ -390,7 +440,7 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
 
     const dayOfWeek = getDayOfWeek(selectedDate);
 
-    // 1. Encontrar asistentes disponibles para todo el bloque
+    // 1. Encontrar asistentes disponibles
     const availableAssistants = assistants.filter(ast => {
        const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek]));
        if (!workingAll) return false;
@@ -402,20 +452,17 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
     });
 
     if (availableAssistants.length === 0) {
-       setBookingError('⚠️ No hay asistente disponible de forma continua para este horario y duración.');
+       setBookingError('⚠️ No hay asistente disponible de forma continua para este horario.');
        setTimeout(() => setBookingError(''), 4000);
        return;
     }
 
-    // 3. Asignar aleatoriamente
+    // 2. Asignar aleatoriamente
     const randomIndex = Math.floor(Math.random() * availableAssistants.length);
     const assignedAssistant = availableAssistants[randomIndex];
     const groupId = Date.now().toString() + Math.random().toString(36).substr(2, 5);
 
-    // 4. Guardar SOLO UN bloque en Firebase (La app se encarga de expandirlo visualmente)
-    try {
-      const collRef = collection(db, 'artifacts', appId, 'public', 'data', 'bookings');
-      await addDoc(collRef, {
+    const bookingData = {
         groupId,
         date: selectedDate,
         time: timeSlot,
@@ -428,9 +475,16 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
         comments: comments.trim(),
         isFirstSlot: true,
         createdAt: new Date().toISOString()
-      });
+    };
+
+    try {
+      const collRef = collection(db, 'artifacts', appId, 'public', 'data', 'bookings');
+      await addDoc(collRef, bookingData);
       setPatientName('');
       setComments('');
+      
+      // Notificar a Dentalink
+      notifyDentalinkBlock(bookingData, assignedAssistant);
     } catch (err) {
       console.error("Booking error:", err);
     }
@@ -451,7 +505,7 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
       });
 
       if (availableAssistants.length === 0) {
-         setBookingError(`⚠️ No hay asistentes disponibles a las ${booking.time} por ${booking.duration}m.`);
+         setBookingError(`⚠️ No hay asistentes libres a las ${booking.time}.`);
          setTimeout(() => setBookingError(''), 4000);
          return;
       }
@@ -464,6 +518,8 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
           assistantId: assignedAssistant.id,
           assistantName: assignedAssistant.name
         });
+
+        notifyDentalinkBlock(booking, assignedAssistant);
       } catch (err) {
         console.error("Assign error:", err);
       }
@@ -472,7 +528,6 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
   const handleCancel = async (booking) => {
     try {
       if (booking.groupId && booking.assistantId !== 'pendiente') {
-         // Para retrocompatibilidad con las pruebas viejas eliminamos todo el grupo
          const groupBookings = bookings.filter(b => b.groupId === booking.groupId);
          const promises = groupBookings.map(b => deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', b.id)));
          await Promise.all(promises);
@@ -497,7 +552,7 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
               type="text" 
               value={doctorId} 
               onChange={(e) => setDoctorId(e.target.value)} 
-              placeholder="Ej. Dr. Pérez (o llega por Dentalink)" 
+              placeholder="Ej. Dr. Pérez" 
               className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white" 
             />
           </div>
@@ -537,9 +592,7 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
             const slotBookings = bookings.filter(b => b.date === selectedDate && b.time === slot);
             const availableCount = workingAssistants.length - slotBookings.length;
             
-            // Todas las reservas en este bloque (ya no filtramos por doctor)
             const myBookingsInSlot = slotBookings;
-
             let statusColor = "bg-slate-50 border-slate-200";
             
             if (availableCount <= 0 && workingAssistants.length > 0) {
@@ -567,7 +620,6 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
 
                 <div className="space-y-2 mb-3">
                   {myBookingsInSlot.map(mb => {
-                   const isMyBooking = true; // Habilita la lectura universal y la cancelación/liberación directa de bloques
                    const isUnassigned = mb.assistantId === 'pendiente';
                    const cardColor = isUnassigned ? "bg-red-50 border-red-200 text-red-900" : "bg-amber-100 border-amber-200 text-amber-900";
                     
@@ -590,7 +642,7 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
                            </button>
                          )}
 
-                         {!isUnassigned && isMyBooking && mb.isFirstSlot !== false && (
+                         {!isUnassigned && mb.isFirstSlot !== false && (
                            <button onClick={() => handleCancel(mb)} className="w-full py-1.5 mt-1 bg-white/80 text-red-600 rounded text-xs font-semibold hover:bg-white transition-colors shadow-sm">
                              Liberar Bloque ({mb.duration ? `${mb.duration}m` : '15m'})
                            </button>
@@ -624,7 +676,7 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
 const AssistantView = ({ assistants, bookings }) => {
   const [selectedAssistantId, setSelectedAssistantId] = useState('');
   const [selectedDate, setSelectedDate] = useState(getTodayString());
-  const [viewMode, setViewMode] = useState('personal'); // 'personal' | 'general'
+  const [viewMode, setViewMode] = useState('personal'); 
   const slots = useMemo(() => generateTimeSlots(8, 20), []);
 
   useEffect(() => {
@@ -636,7 +688,6 @@ const AssistantView = ({ assistants, bookings }) => {
   const selectedAssistant = assistants.find(a => a.id === selectedAssistantId);
   const dayOfWeek = getDayOfWeek(selectedDate);
 
-  // Asistentes que trabajan ese día
   const activeAssistants = assistants.filter(ast => ast.schedule?.[dayOfWeek] && ast.schedule[dayOfWeek].length > 0);
 
   return (
@@ -825,15 +876,13 @@ export default function App() {
       snapshot.docs.forEach(doc => {
         const data = doc.data();
 
-        // --- NUEVO: FILTRO DE ESTADOS DE DENTALINK ---
-        // 1: Anulado | 8: No asiste | 14: Cambio de fecha
+        // Filtro de estados (Anulado, No asiste, Cambio de fecha)
         const idEstado = Number(data.id_estado);
         if (idEstado === 1 || idEstado === 8 || idEstado === 14) {
-            return; // Ignoramos esta cita, liberando el bloque automáticamente
+            return; 
         }
         
         let fechaCorregida = data.date;
-        
         if (data.date && typeof data.date !== 'string' && data.date.toDate) {
           fechaCorregida = data.date.toDate().toISOString().split('T')[0];
         } else if (typeof data.date === 'string' && data.date.includes('T')) {
@@ -869,15 +918,13 @@ export default function App() {
     };
   }, [user]);
 
-  // AUTO-ASIGNACIÓN INTELIGENTE
+  // AUTO-ASIGNACIÓN INTELIGENTE CON NOTIFICACIÓN A DENTALINK
   useEffect(() => {
     if (assistants.length === 0 || bookings.length === 0) return;
 
-    // Buscamos citas pendientes que sean el documento principal (isFirstSlot !== false)
     const unassignedBookings = bookings.filter(b => b.assistantId === 'pendiente' && b.isFirstSlot !== false);
 
     unassignedBookings.forEach(async (booking) => {
-      // Evitar procesar el mismo documento múltiples veces simultáneamente
       if (processingIds.current.has(booking.id)) return;
       processingIds.current.add(booking.id);
 
@@ -895,7 +942,6 @@ export default function App() {
       });
 
       if (availableAssistants.length > 0) {
-         // Asignar aleatoriamente entre las que están libres
          const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
          try {
            const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id);
@@ -903,13 +949,15 @@ export default function App() {
              assistantId: assignedAssistant.id,
              assistantName: assignedAssistant.name
            });
-           // Una vez actualizado, Firebase enviará otro snapshot y ya no será 'pendiente'
+           
+           // NOTIFICAR BLOQUEO A DENTALINK VÍA N8N
+           notifyDentalinkBlock(booking, assignedAssistant);
+
          } catch (err) {
            console.error("Auto-assign error:", err);
-           processingIds.current.delete(booking.id); // Permite reintentar si falla
+           processingIds.current.delete(booking.id);
          }
       } else {
-         // Nadie disponible, liberar el candado después de un rato para reintentos si alguien se libera
          setTimeout(() => {
            processingIds.current.delete(booking.id);
          }, 10000);
@@ -923,7 +971,6 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 font-sans">
-      {/* HEADER */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-20">
         <div className="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2 text-blue-700">
@@ -931,7 +978,6 @@ export default function App() {
             <h1 className="text-xl font-bold tracking-tight">Molaria Assist<span className="text-blue-400 font-light">Hub</span></h1>
           </div>
           
-          {/* Role Selector (For testing purposes) */}
           <div className="flex bg-slate-100 p-1 rounded-lg">
             <button 
               onClick={() => setRole('admin')}
@@ -955,7 +1001,6 @@ export default function App() {
         </div>
       </header>
 
-      {/* MAIN CONTENT */}
       <main className="max-w-6xl mx-auto px-4 py-8">
         {role === 'admin' && <AdminView assistants={assistants} doctors={doctors} />}
         {role === 'doctor' && <DoctorView assistants={assistants} bookings={bookings} doctors={doctors} />}
