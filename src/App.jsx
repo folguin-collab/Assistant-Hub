@@ -824,6 +824,14 @@ export default function App() {
       
       snapshot.docs.forEach(doc => {
         const data = doc.data();
+
+        // --- NUEVO: FILTRO DE ESTADOS DE DENTALINK ---
+        // 1: Anulado | 8: No asiste | 14: Cambio de fecha
+        const idEstado = Number(data.id_estado);
+        if (idEstado === 1 || idEstado === 8 || idEstado === 14) {
+            return; // Ignoramos esta cita, liberando el bloque automáticamente
+        }
+        
         let fechaCorregida = data.date;
         
         if (data.date && typeof data.date !== 'string' && data.date.toDate) {
