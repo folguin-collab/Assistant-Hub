@@ -8,7 +8,7 @@ import { Calendar, Clock, User, UserPlus, Trash2, CheckCircle, XCircle, AlertCir
 const N8N_WEBHOOK_BLOQUEOS_URL = "https://automatizaciones-n8n.ani4cn.easypanel.host/webhook/181d9cb9-3a71-4e3d-85ce-9427981cab6b"; // <-- ¡PEGA AQUÍ LA URL DE TU NUEVO WEBHOOK DE N8N!
 const ID_PACIENTE_BLOQUEO = 8037;
 const ID_ESTADO_BLOQUEO = 24;
-const ID_DENTISTA_ASISTENTE = 19; // <-- Agenda compartida de "Asistente Dental" en Dentalink
+const ID_DENTISTA_ASISTENTE = 11; // <-- Agenda compartida de "Asistente Dental" en Dentalink
 
 // --- FIREBASE INITIALIZATION ---
 const firebaseConfig = {
