@@ -8,6 +8,7 @@ import { Calendar, Clock, User, UserPlus, Trash2, CheckCircle, XCircle, AlertCir
 const N8N_WEBHOOK_BLOQUEOS_URL = "https://automatizaciones-n8n.ani4cn.easypanel.host/webhook/181d9cb9-3a71-4e3d-85ce-9427981cab6b"; // <-- ¡PEGA AQUÍ LA URL DE TU NUEVO WEBHOOK DE N8N!
 const ID_PACIENTE_BLOQUEO = 8037;
 const ID_ESTADO_BLOQUEO = 24;
+const ID_DENTISTA_ASISTENTE = 19; // <-- Agenda compartida de "Asistente Dental" en Dentalink
 
 // --- FIREBASE INITIALIZATION ---
 const firebaseConfig = {
@@ -80,7 +81,7 @@ const calculateEndTime = (startTime, durationMinutes) => {
 
 // Enviar Bloqueo a n8n
 const notifyDentalinkBlock = async (booking, assistant) => {
-    if (!N8N_WEBHOOK_BLOQUEOS_URL || !assistant.dentalinkId) return;
+    if (!N8N_WEBHOOK_BLOQUEOS_URL) return;
     try {
         await fetch(N8N_WEBHOOK_BLOQUEOS_URL, {
             method: 'POST',
@@ -88,12 +89,12 @@ const notifyDentalinkBlock = async (booking, assistant) => {
             body: JSON.stringify({
                 id_paciente: ID_PACIENTE_BLOQUEO,
                 id_estado: ID_ESTADO_BLOQUEO,
-                id_dentista: assistant.dentalinkId,
+                id_dentista: ID_DENTISTA_ASISTENTE, // Siempre va a la agenda de Asistente Dental
                 fecha: booking.date,
                 hora_inicio: booking.time,
                 hora_fin: calculateEndTime(booking.time, booking.duration),
                 duracion: booking.duration,
-                comentarios: `Apoyando a: ${booking.doctorName} (Px: ${booking.patientName})`
+                comentarios: `[${assistant.name}] Apoyando a: ${booking.doctorName} (Px: ${booking.patientName})`
             })
         });
     } catch (e) {
@@ -108,9 +109,7 @@ const notifyDentalinkBlock = async (booking, assistant) => {
 const AdminView = ({ assistants, doctors }) => {
   const [activeTab, setActiveTab] = useState('assistants'); 
   
-  // Estados para Asistentes
   const [name, setName] = useState('');
-  const [dentalinkId, setDentalinkId] = useState(''); // NUEVO: ID Dentalink de la asistente
   const defaultSchedule = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [], 6: [] };
   const [schedule, setSchedule] = useState(defaultSchedule);
   const [editingId, setEditingId] = useState(null);
@@ -118,7 +117,6 @@ const AdminView = ({ assistants, doctors }) => {
   const [blockStart, setBlockStart] = useState('09:00');
   const [blockEnd, setBlockEnd] = useState('13:00');
 
-  // Estados para Doctores
   const [docName, setDocName] = useState('');
   const [editingDocId, setEditingDocId] = useState(null);
 
@@ -143,14 +141,13 @@ const AdminView = ({ assistants, doctors }) => {
     try {
       if (editingId) {
         const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'assistants', editingId);
-        await updateDoc(docRef, { name, dentalinkId, schedule });
+        await updateDoc(docRef, { name, schedule });
         setEditingId(null);
       } else {
         const collRef = collection(db, 'artifacts', appId, 'public', 'data', 'assistants');
-        await addDoc(collRef, { name, dentalinkId, schedule });
+        await addDoc(collRef, { name, schedule });
       }
       setName('');
-      setDentalinkId('');
       setSchedule(defaultSchedule);
     } catch (err) {
       console.error("Error saving assistant:", err);
@@ -159,7 +156,6 @@ const AdminView = ({ assistants, doctors }) => {
 
   const handleEdit = (ast) => {
     setName(ast.name);
-    setDentalinkId(ast.dentalinkId || '');
     setSchedule(ast.schedule || defaultSchedule);
     setEditingId(ast.id);
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -167,7 +163,6 @@ const AdminView = ({ assistants, doctors }) => {
 
   const handleCancelEdit = () => {
     setName('');
-    setDentalinkId('');
     setSchedule(defaultSchedule);
     setEditingId(null);
   };
@@ -231,15 +226,9 @@ const AdminView = ({ assistants, doctors }) => {
               Agregar Nueva Asistente y Horarios
             </h3>
             
-            <div className="flex flex-col md:flex-row gap-4 mb-4">
-              <div className="flex-1">
-                <label className="block text-sm font-medium text-slate-600 mb-1">Nombre</label>
-                <input type="text" value={name} onChange={(e) => setName(e.target.value)} className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Ej. María Pérez" />
-              </div>
-              <div className="md:w-1/3">
-                <label className="block text-sm font-medium text-slate-600 mb-1" title="ID del perfil de la Asistente en Dentalink">ID en Dentalink</label>
-                <input type="text" value={dentalinkId} onChange={(e) => setDentalinkId(e.target.value)} className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Ej. 12" />
-              </div>
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-slate-600 mb-1">Nombre</label>
+              <input type="text" value={name} onChange={(e) => setName(e.target.value)} className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Ej. María Pérez" />
             </div>
 
             <div className="bg-slate-50 p-4 rounded-lg border border-slate-200 mb-4">
@@ -315,11 +304,8 @@ const AdminView = ({ assistants, doctors }) => {
                         {ast.name.charAt(0)}
                       </div>
                       <div>
-                        <p className="font-medium text-slate-800 mb-1">
-                          {ast.name} 
-                          {ast.dentalinkId && <span className="ml-2 text-xs bg-slate-200 text-slate-600 px-2 py-0.5 rounded-full">ID DL: {ast.dentalinkId}</span>}
-                        </p>
-                        <div className="text-xs text-slate-500 space-y-1 mt-1">
+                        <p className="font-medium text-slate-800 mb-1">{ast.name}</p>
+                        <div className="text-xs text-slate-500 space-y-1">
                           {DAYS_OF_WEEK.map((day, i) => {
                             const blocks = ast.schedule?.[i];
                             if (!blocks || blocks.length === 0) return null;
@@ -348,7 +334,6 @@ const AdminView = ({ assistants, doctors }) => {
 
       {activeTab === 'doctors' && (
         <>
-          {/* Doctores code stays the same... */}
           <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
             <h3 className="text-lg font-semibold text-slate-800 mb-4 flex items-center gap-2">
               <Stethoscope size={20} className="text-blue-600" />
@@ -440,7 +425,6 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
 
     const dayOfWeek = getDayOfWeek(selectedDate);
 
-    // 1. Encontrar asistentes disponibles
     const availableAssistants = assistants.filter(ast => {
        const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek]));
        if (!workingAll) return false;
@@ -457,7 +441,6 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
        return;
     }
 
-    // 2. Asignar aleatoriamente
     const randomIndex = Math.floor(Math.random() * availableAssistants.length);
     const assignedAssistant = availableAssistants[randomIndex];
     const groupId = Date.now().toString() + Math.random().toString(36).substr(2, 5);
@@ -483,7 +466,6 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
       setPatientName('');
       setComments('');
       
-      // Notificar a Dentalink
       notifyDentalinkBlock(bookingData, assignedAssistant);
     } catch (err) {
       console.error("Booking error:", err);
