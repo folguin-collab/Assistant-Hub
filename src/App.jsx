@@ -5,10 +5,10 @@ import { getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc, addDoc, u
 import { Calendar, Clock, User, UserPlus, Trash2, CheckCircle, XCircle, AlertCircle, Shield, Stethoscope, Users, Pencil, FileText } from 'lucide-react';
 
 // --- CONFIGURACIÓN DE INTEGRACIÓN ---
-const N8N_WEBHOOK_BLOQUEOS_URL = "https://automatizaciones-n8n.ani4cn.easypanel.host/webhook/181d9cb9-3a71-4e3d-85ce-9427981cab6b"; // <-- ¡PEGA AQUÍ LA URL DE TU NUEVO WEBHOOK DE N8N!
+const N8N_WEBHOOK_BLOQUEOS_URL = ""; // <-- ¡PEGA AQUÍ LA URL DE TU NUEVO WEBHOOK DE N8N!
 const ID_PACIENTE_BLOQUEO = 8037;
 const ID_ESTADO_BLOQUEO = 24;
-const ID_DENTISTA_ASISTENTE = 11; // <-- Agenda compartida de "Asistente Dental" en Dentalink
+const ID_DENTISTA_ASISTENTE = 11; // <-- ¡CORREGIDO! Agenda compartida de "Asistente Dental" en Dentalink es el 11
 
 // --- FIREBASE INITIALIZATION ---
 const firebaseConfig = {
@@ -89,7 +89,7 @@ const notifyDentalinkBlock = async (booking, assistant) => {
             body: JSON.stringify({
                 id_paciente: ID_PACIENTE_BLOQUEO,
                 id_estado: ID_ESTADO_BLOQUEO,
-                id_dentista: ID_DENTISTA_ASISTENTE, // Siempre va a la agenda de Asistente Dental
+                id_dentista: ID_DENTISTA_ASISTENTE, // Ahora envía 11
                 fecha: booking.date,
                 hora_inicio: booking.time,
                 hora_fin: calculateEndTime(booking.time, booking.duration),
