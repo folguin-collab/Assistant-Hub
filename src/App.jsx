@@ -5,10 +5,10 @@ import { getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc, addDoc, u
 import { Calendar, Clock, User, UserPlus, Trash2, CheckCircle, XCircle, AlertCircle, Shield, Stethoscope, Users, Pencil, FileText } from 'lucide-react';
 
 // --- CONFIGURACIÓN DE INTEGRACIÓN ---
-const N8N_WEBHOOK_BLOQUEOS_URL = "https://automatizaciones-n8n.ani4cn.easypanel.host/webhook/181d9cb9-3a71-4e3d-85ce-9427981cab6b"; // <-- ¡PEGA AQUÍ LA URL DE TU NUEVO WEBHOOK DE N8N!
+const N8N_WEBHOOK_BLOQUEOS_URL = "https://automatizaciones-n8n.ani4cn.easypanel.host/webhook/181d9cb9-3a71-4e3d-85ce-9427981cab6b"; // <-- ¡PEGA AQUÍ LA URL DE TU WEBHOOK DE N8N!
 const ID_PACIENTE_BLOQUEO = 8037;
 const ID_ESTADO_BLOQUEO = 24;
-const ID_DENTISTA_ASISTENTE = 11; // <-- ¡CORREGIDO! Agenda compartida de "Asistente Dental" en Dentalink es el 11
+const ID_DENTISTA_ASISTENTE = 11; 
 
 // --- FIREBASE INITIALIZATION ---
 const firebaseConfig = {
@@ -70,7 +70,6 @@ const getSlotsForDuration = (startTime, durationMinutes) => {
   return slots;
 };
 
-// Función para calcular hora final (H:i) sumando minutos a una hora inicial
 const calculateEndTime = (startTime, durationMinutes) => {
     let [h, m] = startTime.split(':').map(Number);
     m += durationMinutes;
@@ -79,26 +78,53 @@ const calculateEndTime = (startTime, durationMinutes) => {
     return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
 };
 
-// Enviar Bloqueo a n8n
-const notifyDentalinkBlock = async (booking, assistant) => {
+// --- EL NUEVO NOTIFICADOR INTELIGENTE (EL VIGILANTE) ---
+const notifyDentalinkBlock = async (booking, assistant, action = 'crear', newEstado = ID_ESTADO_BLOQUEO) => {
     if (!N8N_WEBHOOK_BLOQUEOS_URL) return;
     try {
-        await fetch(N8N_WEBHOOK_BLOQUEOS_URL, {
+        const payload = {
+            accion: action,
+            id_cita_dentalink: booking.dentalink_bloqueo_id || null, // Se envía para Editar o Anular
+            id_paciente: ID_PACIENTE_BLOQUEO,
+            id_estado: newEstado, 
+            id_dentista: ID_DENTISTA_ASISTENTE, 
+            fecha: booking.date,
+            hora_inicio: booking.time,
+            hora_fin: calculateEndTime(booking.time, booking.duration),
+            duracion: booking.duration,
+            comentarios: `[${assistant.name}] Apoyando a: ${booking.doctorName} (Px: ${booking.patientName})`
+        };
+
+        const response = await fetch(N8N_WEBHOOK_BLOQUEOS_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                id_paciente: ID_PACIENTE_BLOQUEO,
-                id_estado: ID_ESTADO_BLOQUEO,
-                id_dentista: ID_DENTISTA_ASISTENTE, // Ahora envía 11
-                fecha: booking.date,
-                hora_inicio: booking.time,
-                hora_fin: calculateEndTime(booking.time, booking.duration),
-                duracion: booking.duration,
-                comentarios: `[${assistant.name}] Apoyando a: ${booking.doctorName} (Px: ${booking.patientName})`
-            })
+            body: JSON.stringify(payload)
         });
+
+        // Si es una creación, capturamos el ID que devuelve n8n (Dentalink) y lo guardamos
+        if (action === 'crear' && response.ok) {
+            try {
+                const text = await response.text();
+                if (text) {
+                    const data = JSON.parse(text);
+                    let newId = null;
+                    // Detectar ID en base a cómo lo devuelve n8n
+                    if (Array.isArray(data) && data[0]?.data?.id) newId = data[0].data.id;
+                    else if (data?.data?.id) newId = data.data.id;
+                    else if (data?.id) newId = data.id;
+
+                    if (newId && booking.id) {
+                        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id);
+                        await updateDoc(docRef, { dentalink_bloqueo_id: newId });
+                        console.log(`✅ Bloqueo creado exitosamente en Dentalink. ID: ${newId}`);
+                    }
+                }
+            } catch (parseError) {
+                console.warn("⚠️ Bloqueo creado, pero no se pudo leer el ID de la respuesta de n8n.", parseError);
+            }
+        }
     } catch (e) {
-        console.error("Error al notificar bloqueo a n8n:", e);
+        console.error(`Error al ejecutar la acción '${action}' en n8n:`, e);
     }
 };
 
@@ -457,7 +483,11 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
         duration: duration,
         comments: comments.trim(),
         isFirstSlot: true,
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        // Valores de sincronización (Vigilante)
+        last_synced_date: selectedDate,
+        last_synced_time: timeSlot,
+        last_synced_duration: duration
     };
 
     try {
@@ -465,8 +495,7 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
       await addDoc(collRef, bookingData);
       setPatientName('');
       setComments('');
-      
-      notifyDentalinkBlock(bookingData, assignedAssistant);
+      // No llamamos a notifyDentalinkBlock aquí. El Re-creador lo hará automáticamente al ver un registro sin ID.
     } catch (err) {
       console.error("Booking error:", err);
     }
@@ -498,10 +527,12 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
         const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id);
         await updateDoc(docRef, {
           assistantId: assignedAssistant.id,
-          assistantName: assignedAssistant.name
+          assistantName: assignedAssistant.name,
+          // Guardamos el estado inicial para comparar si la mueven después
+          last_synced_date: booking.date,
+          last_synced_time: booking.time,
+          last_synced_duration: booking.duration
         });
-
-        notifyDentalinkBlock(booking, assignedAssistant);
       } catch (err) {
         console.error("Assign error:", err);
       }
@@ -511,9 +542,17 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
     try {
       if (booking.groupId && booking.assistantId !== 'pendiente') {
          const groupBookings = bookings.filter(b => b.groupId === booking.groupId);
-         const promises = groupBookings.map(b => deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', b.id)));
-         await Promise.all(promises);
+         groupBookings.forEach(async (b) => {
+             // Anulamos en Dentalink antes de borrar de la BD
+             if (b.dentalink_bloqueo_id && b.isFirstSlot !== false) {
+                 await notifyDentalinkBlock(b, {name: b.assistantName}, 'anular', 14);
+             }
+             await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', b.id));
+         });
       } else {
+         if (booking.dentalink_bloqueo_id) {
+             await notifyDentalinkBlock(booking, {name: booking.assistantName}, 'anular', 14);
+         }
          const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id);
          await deleteDoc(docRef);
       }
@@ -802,7 +841,7 @@ const AssistantView = ({ assistants, bookings }) => {
 // --- MAIN APP COMPONENT ---
 export default function App() {
   const [user, setUser] = useState(null);
-  const [role, setRole] = useState('doctor'); // 'admin', 'doctor', 'assistant'
+  const [role, setRole] = useState('doctor'); 
   const [assistants, setAssistants] = useState([]);
   const [doctors, setDoctors] = useState([]);
   const [bookings, setBookings] = useState([]);
@@ -830,11 +869,10 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Fetch Data
+  // Fetch Data (AQUÍ ESTÁ EL VIGILANTE DE FIREBASE)
   useEffect(() => {
     if (!user) return;
 
-    // Listen to Assistants
     const asstRef = collection(db, 'artifacts', appId, 'public', 'data', 'assistants');
     const unsubAssistants = onSnapshot(asstRef, (snapshot) => {
       const astData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
@@ -842,7 +880,6 @@ export default function App() {
       setAssistants(astData);
     }, (error) => console.error(error));
 
-    // Listen to Doctors
     const docRef = collection(db, 'artifacts', appId, 'public', 'data', 'doctors');
     const unsubDoctors = onSnapshot(docRef, (snapshot) => {
       const docData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
@@ -850,19 +887,56 @@ export default function App() {
       setDoctors(docData);
     }, (error) => console.error(error));
 
-    // Listen to Bookings
     const bookRef = collection(db, 'artifacts', appId, 'public', 'data', 'bookings');
     const unsubBookings = onSnapshot(bookRef, (snapshot) => {
       let expandedBookings = [];
       
-      snapshot.docs.forEach(doc => {
-        const data = doc.data();
-
-        // Filtro de estados (Anulado, No asiste, Cambio de fecha)
+      snapshot.docs.forEach(docSnap => {
+        const data = docSnap.data();
+        const docId = docSnap.id;
         const idEstado = Number(data.id_estado);
+
+        // ==== INICIO DEL VIGILANTE (Sincronización Inteligente) ====
+        if (data.dentalink_bloqueo_id && !data.bloqueo_anulado) {
+            
+            // 1. ¿Cancelaron o anularon la cita en Dentalink?
+            if (idEstado === 1 || idEstado === 8 || idEstado === 14) {
+                notifyDentalinkBlock({ ...data, id: docId }, { name: data.assistantName }, 'anular', idEstado);
+                updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', docId), { bloqueo_anulado: true });
+                return; // Ocultamos del calendario visual
+            }
+
+            // 2. ¿Movieron la fecha, la hora, o cambiaron la duración?
+            const dateChanged = data.last_synced_date && data.date !== data.last_synced_date;
+            const timeChanged = data.last_synced_time && data.time !== data.last_synced_time;
+            const durationChanged = data.last_synced_duration && data.duration !== data.last_synced_duration;
+
+            if (dateChanged || timeChanged) {
+                // Como cambió fecha/hora, Dentalink a veces falla con PUT. 
+                // Estrategia: Anular el viejo (Estado 14) y borrar el ID para que el Re-Creador haga uno nuevo.
+                notifyDentalinkBlock({ ...data, id: docId }, { name: data.assistantName }, 'anular', 14);
+                
+                updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', docId), { 
+                    dentalink_bloqueo_id: null, // Lo dejamos en null para forzar un POST nuevo
+                    last_synced_time: data.time,
+                    last_synced_date: data.date,
+                    last_synced_duration: data.duration
+                });
+            } else if (durationChanged) {
+                // Solo cambió duración. Podemos usar PUT tranquilamente para actualizar.
+                notifyDentalinkBlock({ ...data, id: docId }, { name: data.assistantName }, 'editar', ID_ESTADO_BLOQUEO);
+                updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', docId), { 
+                    last_synced_duration: data.duration 
+                });
+            }
+        }
+
+        // Si ya está cancelada, no la procesamos para el calendario
         if (idEstado === 1 || idEstado === 8 || idEstado === 14) {
             return; 
         }
+        // ==== FIN DEL VIGILANTE ====
+
         
         let fechaCorregida = data.date;
         if (data.date && typeof data.date !== 'string' && data.date.toDate) {
@@ -872,7 +946,7 @@ export default function App() {
         }
 
         const durationNum = Number(data.duration) || 15;
-        const baseBooking = { id: doc.id, ...data, date: fechaCorregida, duration: durationNum };
+        const baseBooking = { id: docId, ...data, date: fechaCorregida, duration: durationNum };
         
         if (baseBooking.time) {
           const slotsCovered = getSlotsForDuration(baseBooking.time, durationNum);
@@ -881,7 +955,7 @@ export default function App() {
               ...baseBooking,
               time: slotTime,
               isFirstSlot: index === 0,
-              virtualId: `${doc.id}_${index}`
+              virtualId: `${docId}_${index}`
             });
           });
         } else {
@@ -900,7 +974,7 @@ export default function App() {
     };
   }, [user]);
 
-  // AUTO-ASIGNACIÓN INTELIGENTE CON NOTIFICACIÓN A DENTALINK
+  // AUTO-ASIGNACIÓN INTELIGENTE 
   useEffect(() => {
     if (assistants.length === 0 || bookings.length === 0) return;
 
@@ -929,12 +1003,11 @@ export default function App() {
            const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id);
            await updateDoc(docRef, {
              assistantId: assignedAssistant.id,
-             assistantName: assignedAssistant.name
+             assistantName: assignedAssistant.name,
+             last_synced_date: booking.date,
+             last_synced_time: booking.time,
+             last_synced_duration: booking.duration
            });
-           
-           // NOTIFICAR BLOQUEO A DENTALINK VÍA N8N
-           notifyDentalinkBlock(booking, assignedAssistant);
-
          } catch (err) {
            console.error("Auto-assign error:", err);
            processingIds.current.delete(booking.id);
@@ -946,6 +1019,31 @@ export default function App() {
       }
     });
   }, [bookings, assistants]);
+
+  // EL RE-CREADOR CENTRAL: Detecta citas asignadas que NO tienen ID de Dentalink aún, y les dispara el POST
+  useEffect(() => {
+      if (bookings.length === 0) return;
+      
+      const pendingBlocks = bookings.filter(b => 
+          b.assistantId && 
+          b.assistantId !== 'pendiente' && 
+          !b.dentalink_bloqueo_id && 
+          !b.bloqueo_anulado && 
+          b.isFirstSlot !== false // Solo procesar el documento base
+      );
+
+      pendingBlocks.forEach(async (booking) => {
+          if (processingIds.current.has(booking.id + '_create')) return;
+          processingIds.current.add(booking.id + '_create');
+
+          await notifyDentalinkBlock(booking, { name: booking.assistantName }, 'crear', ID_ESTADO_BLOQUEO);
+          
+          // Limpiar la bandera por si falla el fetch, para que lo intente de nuevo luego
+          setTimeout(() => {
+              processingIds.current.delete(booking.id + '_create');
+          }, 8000);
+      });
+  }, [bookings]);
 
   if (loading) {
     return <div className="min-h-screen bg-slate-50 flex items-center justify-center text-blue-600 font-medium">Cargando Sistema...</div>;
