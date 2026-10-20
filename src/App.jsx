@@ -5,10 +5,11 @@ import { getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc, addDoc, u
 import { Calendar, Clock, User, UserPlus, Trash2, CheckCircle, XCircle, AlertCircle, Shield, Stethoscope, Users, Pencil, FileText } from 'lucide-react';
 
 // --- CONFIGURACIÓN DE INTEGRACIÓN ---
-const N8N_WEBHOOK_BLOQUEOS_URL = "https://automatizaciones-n8n.ani4cn.easypanel.host/webhook/181d9cb9-3a71-4e3d-85ce-9427981cab6b"; // <-- ¡PEGA AQUÍ LA URL DE TU WEBHOOK DE N8N!
+const N8N_WEBHOOK_BLOQUEOS_URL = ""; // <-- ¡PEGA AQUÍ LA URL DE TU WEBHOOK DE N8N!
 const ID_PACIENTE_BLOQUEO = 8037;
-const ID_ESTADO_BLOQUEO = 24;
 const ID_DENTISTA_ASISTENTE = 11; 
+const ID_ESTADO_DISPONIBLE = 24; // Gris/Verde (Hay cupo)
+const ID_ESTADO_LLENO = 25;      // Rojo (Asistentes agotadas)
 
 // --- FIREBASE INITIALIZATION ---
 const firebaseConfig = {
@@ -70,15 +71,18 @@ const getSlotsForDuration = (startTime, durationMinutes) => {
   return slots;
 };
 
-const calculateEndTime = (startTime, durationMinutes) => {
-    let [h, m] = startTime.split(':').map(Number);
-    m += durationMinutes;
-    h += Math.floor(m / 60);
-    m = m % 60;
-    return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+const timeToMins = (t) => {
+    if(!t) return 0;
+    const [h, m] = t.split(':').map(Number); 
+    return h * 60 + m; 
 };
 
-// Formateador seguro de fechas para evitar el error "seconds"
+const minsToTime = (m) => { 
+    const h = Math.floor(m / 60); 
+    const mm = m % 60; 
+    return `${h.toString().padStart(2,'0')}:${mm.toString().padStart(2,'0')}`; 
+};
+
 const safeFormatDate = (dateVal) => {
     if (!dateVal) return getTodayString();
     if (typeof dateVal === 'object' && dateVal.toDate) {
@@ -90,22 +94,73 @@ const safeFormatDate = (dateVal) => {
     return dateVal;
 };
 
-// --- EL NUEVO NOTIFICADOR INTELIGENTE (EL VIGILANTE) ---
-const notifyDentalinkBlock = async (booking, assistant, action = 'crear', newEstado = ID_ESTADO_BLOQUEO) => {
+// --- HALF-HOURLY BLOCK GENERATOR & SEMÁFORO LOGIC ---
+const computeHalfHourlyBlocks = (bookings, assistants) => {
+    const byDate = {};
+    bookings.forEach(b => {
+       if(b.assistantId === 'pendiente' || b.bloqueo_anulado || b.isFirstSlot === false) return;
+       const date = safeFormatDate(b.date);
+       if(!byDate[date]) byDate[date] = [];
+       const startMins = timeToMins(b.time);
+       byDate[date].push({ ...b, startMins, endMins: startMins + Number(b.duration) });
+    });
+
+    const halfHourlyBlocks = [];
+    Object.keys(byDate).forEach(date => {
+       const dayBookings = byDate[date];
+       const dayOfWeek = getDayOfWeek(date);
+       
+       // Evaluamos cada media hora de la jornada clínica (8 a 20)
+       for (let h = 8; h <= 20; h++) {
+           for (let m = 0; m < 60; m += 30) {
+               if (h === 20 && m > 0) break; 
+               const slotStartMins = h * 60 + m;
+               const slotEndMins = slotStartMins + 30;
+               const slotTime = minsToTime(slotStartMins);
+               
+               // Citas que tocan esta media hora
+               const overlapping = dayBookings.filter(b => b.startMins < slotEndMins && b.endMins > slotStartMins);
+               
+               if (overlapping.length > 0) {
+                   overlapping.sort((a,b) => a.startMins - b.startMins);
+                   const comments = overlapping.map(b => `${b.time}-${minsToTime(b.endMins)} [${b.assistantName}] Dra.${b.doctorName}`).join(' | ');
+                   
+                   // LÓGICA DEL SEMÁFORO
+                   // ¿Cuántas asistentes están trabajando a esta hora?
+                   const workingAssistantsCount = assistants.filter(ast => isTimeInAnyBlock(slotTime, ast.schedule?.[dayOfWeek])).length;
+                   // Si hay igual o más citas que asistentes trabajando, el bloque se pone ROJO (Lleno)
+                   const id_estado = (overlapping.length >= workingAssistantsCount && workingAssistantsCount > 0) ? ID_ESTADO_LLENO : ID_ESTADO_DISPONIBLE;
+                   
+                   halfHourlyBlocks.push({
+                       id: `half_${date}_${slotStartMins}`,
+                       date: date,
+                       time: slotTime,
+                       duration: 30, // Bloque fijo de 30 mins
+                       comments: comments,
+                       id_estado: id_estado
+                   });
+               }
+           }
+       }
+    });
+    return halfHourlyBlocks;
+};
+
+// --- EL NUEVO NOTIFICADOR DE BLOQUES DE 30 MIN ---
+const notifyDentalinkHalfHourlyBlock = async (block, action = 'crear', newEstado) => {
     if (!N8N_WEBHOOK_BLOQUEOS_URL) return;
     try {
-        const safeDate = safeFormatDate(booking.date);
         const payload = {
             accion: action,
-            id_cita_dentalink: booking.dentalink_bloqueo_id || null, 
+            id_cita_dentalink: block.dentalink_bloqueo_id || null, 
             id_paciente: ID_PACIENTE_BLOQUEO,
             id_estado: newEstado, 
             id_dentista: ID_DENTISTA_ASISTENTE, 
-            fecha: safeDate,
-            hora_inicio: booking.time,
-            hora_fin: calculateEndTime(booking.time, booking.duration),
-            duracion: booking.duration,
-            comentarios: `[${assistant.name}] Apoyando a: ${booking.doctorName} (Px: ${booking.patientName})`
+            fecha: block.date,
+            hora_inicio: block.time,
+            hora_fin: minsToTime(timeToMins(block.time) + block.duration),
+            duracion: block.duration,
+            comentarios: block.comments
         };
 
         const response = await fetch(N8N_WEBHOOK_BLOQUEOS_URL, {
@@ -124,21 +179,20 @@ const notifyDentalinkBlock = async (booking, assistant, action = 'crear', newEst
                     else if (data?.data?.id) newId = data.data.id;
                     else if (data?.id) newId = data.id;
 
-                    if (newId && booking.id) {
-                        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id);
-                        await updateDoc(docRef, { dentalink_bloqueo_id: newId });
-                        console.log(`✅ Bloqueo creado en Dentalink. ID: ${newId}`);
+                    if (newId) {
+                        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'half_hourly_blocks_state', block.id);
+                        await setDoc(docRef, { ...block, dentalink_bloqueo_id: newId });
+                        console.log(`✅ Bloque 30min creado. ID: ${newId}`);
                     }
                 }
             } catch (parseError) {
-                console.warn("⚠️ Bloqueo creado, pero no se pudo leer el ID.", parseError);
+                console.warn("⚠️ Bloque creado, pero no se pudo leer el ID.", parseError);
             }
         }
     } catch (e) {
         console.error(`Error al ejecutar la acción '${action}' en n8n:`, e);
     }
 };
-
 
 // --- COMPONENTS ---
 
@@ -437,34 +491,18 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
   const slots = useMemo(() => generateTimeSlots(8, 20), []);
 
   const handleBook = async (timeSlot) => {
-    if (!doctorId) {
-       setBookingError('⚠️ Ingresa el nombre del Doctor(a).');
-       setTimeout(() => setBookingError(''), 3000);
-       return;
-    }
-    if (!patientName.trim()) {
-       setBookingError('⚠️ Ingresa el nombre del paciente.');
-       setTimeout(() => setBookingError(''), 3000);
-       return;
-    }
+    if (!doctorId) { setBookingError('⚠️ Ingresa el nombre del Doctor(a).'); setTimeout(() => setBookingError(''), 3000); return; }
+    if (!patientName.trim()) { setBookingError('⚠️ Ingresa el nombre del paciente.'); setTimeout(() => setBookingError(''), 3000); return; }
     setBookingError('');
 
     const requiredSlots = getSlotsForDuration(timeSlot, duration);
-    if (requiredSlots.length < duration / 15) {
-       setBookingError('⚠️ La duración excede el horario disponible.');
-       setTimeout(() => setBookingError(''), 3000);
-       return;
-    }
+    if (requiredSlots.length < duration / 15) { setBookingError('⚠️ La duración excede el horario disponible.'); setTimeout(() => setBookingError(''), 3000); return; }
 
     const dayOfWeek = getDayOfWeek(selectedDate);
-
     const availableAssistants = assistants.filter(ast => {
        const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek]));
        if (!workingAll) return false;
-
-       const bookedInAny = requiredSlots.some(slot => 
-          bookings.some(b => b.date === selectedDate && b.time === slot && b.assistantId === ast.id)
-       );
+       const bookedInAny = requiredSlots.some(slot => bookings.some(b => b.date === selectedDate && b.time === slot && b.assistantId === ast.id));
        return !bookedInAny;
     });
 
@@ -474,8 +512,7 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
        return;
     }
 
-    const randomIndex = Math.floor(Math.random() * availableAssistants.length);
-    const assignedAssistant = availableAssistants[randomIndex];
+    const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
     const groupId = Date.now().toString() + Math.random().toString(36).substr(2, 5);
 
     const bookingData = {
@@ -490,20 +527,14 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
         duration: duration,
         comments: comments.trim(),
         isFirstSlot: true,
-        createdAt: new Date().toISOString(),
-        last_synced_date: selectedDate,
-        last_synced_time: timeSlot,
-        last_synced_duration: duration
+        createdAt: new Date().toISOString()
     };
 
     try {
       const collRef = collection(db, 'artifacts', appId, 'public', 'data', 'bookings');
       await addDoc(collRef, bookingData);
-      setPatientName('');
-      setComments('');
-    } catch (err) {
-      console.error("Booking error:", err);
-    }
+      setPatientName(''); setComments('');
+    } catch (err) { console.error("Booking error:", err); }
   };
 
   const handleAssignToExisting = async (booking) => {
@@ -513,10 +544,7 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
       const availableAssistants = assistants.filter(ast => {
          const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek]));
          if (!workingAll) return false;
-
-         const bookedInAny = requiredSlots.some(slot =>
-            bookings.some(b => b.date === booking.date && b.time === slot && b.assistantId === ast.id && b.id !== booking.id)
-         );
+         const bookedInAny = requiredSlots.some(slot => bookings.some(b => b.date === booking.date && b.time === slot && b.assistantId === ast.id && b.id !== booking.id));
          return !bookedInAny;
       });
 
@@ -527,19 +555,11 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
       }
 
       const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
-
       try {
-        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id);
-        await updateDoc(docRef, {
-          assistantId: assignedAssistant.id,
-          assistantName: assignedAssistant.name,
-          last_synced_date: safeFormatDate(booking.date),
-          last_synced_time: booking.time,
-          last_synced_duration: booking.duration
+        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id), {
+          assistantId: assignedAssistant.id, assistantName: assignedAssistant.name
         });
-      } catch (err) {
-        console.error("Assign error:", err);
-      }
+      } catch (err) { console.error("Assign error:", err); }
   };
 
   const handleCancel = async (booking) => {
@@ -547,21 +567,14 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
       if (booking.groupId && booking.assistantId !== 'pendiente') {
          const groupBookings = bookings.filter(b => b.groupId === booking.groupId);
          groupBookings.forEach(async (b) => {
-             if (b.dentalink_bloqueo_id && b.isFirstSlot !== false) {
-                 await notifyDentalinkBlock(b, {name: b.assistantName}, 'anular', 1);
-             }
-             await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', b.id));
+             await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', b.id), { bloqueo_anulado: true });
+             setTimeout(() => deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', b.id)), 2000);
          });
       } else {
-         if (booking.dentalink_bloqueo_id) {
-             await notifyDentalinkBlock(booking, {name: booking.assistantName}, 'anular', 1);
-         }
-         const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id);
-         await deleteDoc(docRef);
+         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id), { bloqueo_anulado: true });
+         setTimeout(() => deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id)), 2000);
       }
-    } catch (err) {
-      console.error("Cancel error:", err);
-    }
+    } catch (err) { console.error("Cancel error:", err); }
   };
 
   const dayOfWeek = getDayOfWeek(selectedDate);
@@ -572,13 +585,7 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
         <div className="flex flex-col md:flex-row gap-4 items-end">
           <div className="flex-1 w-full">
             <label className="block text-sm font-medium text-slate-600 mb-1">Doctor(a)</label>
-            <input 
-              type="text" 
-              value={doctorId} 
-              onChange={(e) => setDoctorId(e.target.value)} 
-              placeholder="Ej. Dr. Pérez" 
-              className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white" 
-            />
+            <input type="text" value={doctorId} onChange={(e) => setDoctorId(e.target.value)} placeholder="Ej. Dr. Pérez" className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white" />
           </div>
           <div className="flex-1 w-full">
             <label className="block text-sm font-medium text-slate-600 mb-1">Fecha de Consulta</label>
@@ -587,11 +594,7 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
           <div className="flex-1 w-full">
             <label className="block text-sm font-medium text-slate-600 mb-1">Duración</label>
             <select value={duration} onChange={(e) => setDuration(Number(e.target.value))} className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white">
-              <option value={15}>15 minutos</option>
-              <option value={30}>30 minutos</option>
-              <option value={45}>45 minutos</option>
-              <option value={60}>1 hora</option>
-              <option value={90}>1 hora 30 min</option>
+              <option value={15}>15 minutos</option><option value={30}>30 minutos</option><option value={45}>45 minutos</option><option value={60}>1 hora</option><option value={90}>1 hora 30 min</option>
             </select>
           </div>
           <div className="flex-1 w-full relative">
@@ -607,23 +610,16 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
       </div>
 
       <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
-        <h3 className="text-lg font-semibold text-slate-800 p-6 border-b border-slate-100 bg-slate-50">
-          Disponibilidad para el {selectedDate}
-        </h3>
+        <h3 className="text-lg font-semibold text-slate-800 p-6 border-b border-slate-100 bg-slate-50">Disponibilidad para el {selectedDate}</h3>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 p-6">
           {slots.map(slot => {
             const workingAssistants = assistants.filter(ast => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek]));
             const slotBookings = bookings.filter(b => b.date === selectedDate && b.time === slot);
             const availableCount = workingAssistants.length - slotBookings.length;
-            
             const myBookingsInSlot = slotBookings;
             let statusColor = "bg-slate-50 border-slate-200";
-            
-            if (availableCount <= 0 && workingAssistants.length > 0) {
-              statusColor = "bg-red-50 border-red-200";
-            } else if (availableCount > 0) {
-              statusColor = "bg-blue-50 border-blue-200 hover:shadow-md transition-shadow";
-            }
+            if (availableCount <= 0 && workingAssistants.length > 0) statusColor = "bg-red-50 border-red-200";
+            else if (availableCount > 0) statusColor = "bg-blue-50 border-blue-200 hover:shadow-md transition-shadow";
 
             return (
               <div key={slot} className={`p-4 rounded-xl border ${statusColor} flex flex-col justify-between`}>
@@ -631,62 +627,29 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
                   <span className="font-bold text-lg text-slate-700">{slot}</span>
                   {availableCount <= 0 && workingAssistants.length > 0 ? <AlertCircle size={20} className="text-red-500" /> : null}
                 </div>
-                
                 <div className="mb-3">
-                  {workingAssistants.length === 0 ? (
-                    <span className="text-sm text-slate-500">Nadie en turno</span>
-                  ) : (
-                    <span className={`text-sm font-medium ${availableCount > 0 ? 'text-blue-700' : 'text-red-700'}`}>
-                      {availableCount > 0 ? `${availableCount} Asistente(s) disponible(s)` : 'Turnos ocupados'}
-                    </span>
-                  )}
+                  {workingAssistants.length === 0 ? <span className="text-sm text-slate-500">Nadie en turno</span> : <span className={`text-sm font-medium ${availableCount > 0 ? 'text-blue-700' : 'text-red-700'}`}>{availableCount > 0 ? `${availableCount} Asistente(s) disponible(s)` : 'Turnos ocupados'}</span>}
                 </div>
-
                 <div className="space-y-2 mb-3">
                   {myBookingsInSlot.map(mb => {
                    const isUnassigned = mb.assistantId === 'pendiente';
                    const cardColor = isUnassigned ? "bg-red-50 border-red-200 text-red-900" : "bg-amber-100 border-amber-200 text-amber-900";
-                    
                     return (
                       <div key={mb.virtualId || mb.id} className={`${cardColor} border p-2 rounded-lg text-sm shadow-sm`}>
                          <div className="flex justify-between items-center mb-1">
-                           <span className="font-semibold flex items-center gap-1">
-                             {isUnassigned ? <AlertCircle size={14}/> : <CheckCircle size={14}/>} {mb.assistantName}
-                           </span>
+                           <span className="font-semibold flex items-center gap-1">{isUnassigned ? <AlertCircle size={14}/> : <CheckCircle size={14}/>} {mb.assistantName}</span>
                          </div>
-                         <div className="text-xs mb-1 font-medium text-slate-800">
-                           <Stethoscope size={12} className="inline mr-1 opacity-70"/> Dr(a): {mb.doctorName}
-                         </div>
+                         <div className="text-xs mb-1 font-medium text-slate-800"><Stethoscope size={12} className="inline mr-1 opacity-70"/> Dr(a): {mb.doctorName}</div>
                          <div className="text-xs mb-1 opacity-90">Px: {mb.patientName}</div>
                          {mb.comments && <div className="text-xs mb-2 opacity-80 italic">Nota: {mb.comments}</div>}
-                         
-                         {isUnassigned && mb.isFirstSlot !== false && (
-                           <button onClick={() => handleAssignToExisting(mb)} className="w-full py-2 mt-2 bg-blue-600 text-white rounded text-xs font-semibold hover:bg-blue-700 transition-colors shadow-sm">
-                             Asignar Asistente Disponible
-                           </button>
-                         )}
-
-                         {!isUnassigned && mb.isFirstSlot !== false && (
-                           <button onClick={() => handleCancel(mb)} className="w-full py-1.5 mt-1 bg-white/80 text-red-600 rounded text-xs font-semibold hover:bg-white transition-colors shadow-sm">
-                             Liberar Bloque ({mb.duration ? `${mb.duration}m` : '15m'})
-                           </button>
-                         )}
-
-                         {mb.isFirstSlot === false && (
-                            <div className={`text-center text-[10px] mt-1 opacity-60 font-medium ${isUnassigned ? 'text-red-700' : 'text-amber-700'}`}>
-                              Bloque en curso
-                            </div>
-                         )}
+                         {isUnassigned && mb.isFirstSlot !== false && (<button onClick={() => handleAssignToExisting(mb)} className="w-full py-2 mt-2 bg-blue-600 text-white rounded text-xs font-semibold hover:bg-blue-700 transition-colors shadow-sm">Asignar Asistente Disponible</button>)}
+                         {!isUnassigned && mb.isFirstSlot !== false && (<button onClick={() => handleCancel(mb)} className="w-full py-1.5 mt-1 bg-white/80 text-red-600 rounded text-xs font-semibold hover:bg-white transition-colors shadow-sm">Liberar Bloque</button>)}
+                         {mb.isFirstSlot === false && (<div className={`text-center text-[10px] mt-1 opacity-60 font-medium ${isUnassigned ? 'text-red-700' : 'text-amber-700'}`}>Bloque en curso</div>)}
                       </div>
                     );
                   })}
                 </div>
-                
-                {availableCount > 0 && (
-                  <button onClick={() => handleBook(slot)} className="w-full py-2 bg-slate-200 text-slate-700 rounded-lg text-sm font-medium hover:bg-slate-300 transition-colors shadow-sm mt-auto">
-                    Agendar Manualmente
-                  </button>
-                )}
+                {availableCount > 0 && <button onClick={() => handleBook(slot)} className="w-full py-2 bg-slate-200 text-slate-700 rounded-lg text-sm font-medium hover:bg-slate-300 transition-colors shadow-sm mt-auto">Agendar Manualmente</button>}
               </div>
             );
           })}
@@ -710,7 +673,6 @@ const AssistantView = ({ assistants, bookings }) => {
 
   const selectedAssistant = assistants.find(a => a.id === selectedAssistantId);
   const dayOfWeek = getDayOfWeek(selectedDate);
-
   const activeAssistants = assistants.filter(ast => ast.schedule?.[dayOfWeek] && ast.schedule[dayOfWeek].length > 0);
 
   return (
@@ -720,9 +682,7 @@ const AssistantView = ({ assistants, bookings }) => {
           <label className="block text-sm font-medium text-slate-600 mb-1">Soy la asistente:</label>
           <select value={selectedAssistantId} onChange={(e) => setSelectedAssistantId(e.target.value)} className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white">
             <option value="" disabled>Seleccione...</option>
-            {assistants.map(ast => (
-              <option key={ast.id} value={ast.id}>{ast.name}</option>
-            ))}
+            {assistants.map(ast => <option key={ast.id} value={ast.id}>{ast.name}</option>)}
           </select>
         </div>
         <div className="flex-1 w-full">
@@ -732,97 +692,63 @@ const AssistantView = ({ assistants, bookings }) => {
       </div>
 
       <div className="flex gap-2 bg-white p-2 rounded-xl shadow-sm border border-slate-100">
-        <button onClick={() => setViewMode('personal')} className={`flex-1 py-2 px-4 rounded-lg font-medium transition-colors flex items-center justify-center gap-2 ${viewMode === 'personal' ? 'bg-blue-600 text-white' : 'bg-transparent text-slate-600 hover:bg-slate-50'}`}>
-          <User size={18} /> Mi Agenda
-        </button>
-        <button onClick={() => setViewMode('general')} className={`flex-1 py-2 px-4 rounded-lg font-medium transition-colors flex items-center justify-center gap-2 ${viewMode === 'general' ? 'bg-blue-600 text-white' : 'bg-transparent text-slate-600 hover:bg-slate-50'}`}>
-          <Users size={18} /> Agenda General
-        </button>
+        <button onClick={() => setViewMode('personal')} className={`flex-1 py-2 px-4 rounded-lg font-medium transition-colors flex items-center justify-center gap-2 ${viewMode === 'personal' ? 'bg-blue-600 text-white' : 'bg-transparent text-slate-600 hover:bg-slate-50'}`}><User size={18} /> Mi Agenda</button>
+        <button onClick={() => setViewMode('general')} className={`flex-1 py-2 px-4 rounded-lg font-medium transition-colors flex items-center justify-center gap-2 ${viewMode === 'general' ? 'bg-blue-600 text-white' : 'bg-transparent text-slate-600 hover:bg-slate-50'}`}><Users size={18} /> Agenda General</button>
       </div>
 
       {viewMode === 'personal' && selectedAssistant && (
         <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
-          <h3 className="text-lg font-semibold text-slate-800 p-6 border-b border-slate-100 bg-slate-50 flex items-center gap-2">
-            <Calendar size={20} className="text-blue-600" />
-            Agenda de {selectedAssistant.name}
-          </h3>
+          <h3 className="text-lg font-semibold text-slate-800 p-6 border-b border-slate-100 bg-slate-50 flex items-center gap-2"><Calendar size={20} className="text-blue-600" /> Agenda de {selectedAssistant.name}</h3>
           <div className="divide-y divide-slate-100">
             {slots.map(slot => {
               if (!isTimeInAnyBlock(slot, selectedAssistant.schedule?.[dayOfWeek])) return null;
               const slotBooking = bookings.find(b => b.date === selectedDate && b.time === slot && b.assistantId === selectedAssistantId);
-
               return (
                 <div key={slot} className={`p-4 flex flex-col md:flex-row md:items-center gap-4 transition-colors ${slotBooking ? 'bg-blue-50/50' : 'hover:bg-slate-50'}`}>
-                  <div className="w-24 font-bold text-slate-700 text-lg flex items-center gap-2">
-                    <Clock size={16} className="text-slate-400" /> {slot}
-                  </div>
+                  <div className="w-24 font-bold text-slate-700 text-lg flex items-center gap-2"><Clock size={16} className="text-slate-400" /> {slot}</div>
                   <div className="flex-1">
                     {slotBooking ? (
                       <div className="flex flex-col md:flex-row md:items-center gap-2 md:gap-6 text-blue-800 font-medium bg-blue-50 p-2 rounded-lg border border-blue-100">
                         <span className="flex items-center gap-1"><Stethoscope size={16} className="text-blue-600"/> Dr(a): {slotBooking.doctorName}</span>
                         <span className="flex items-center gap-1"><User size={16} className="text-blue-600"/> Px: {slotBooking.patientName}</span>
-                        {slotBooking.comments && <span className="flex items-center gap-1 text-sm italic"><FileText size={16} className="text-blue-600"/> {slotBooking.comments}</span>}
                       </div>
                     ) : (
-                      <div className="text-green-600 font-medium text-sm flex items-center gap-2 px-2">
-                         <CheckCircle size={16} /> Turno Libre
-                      </div>
+                      <div className="text-green-600 font-medium text-sm flex items-center gap-2 px-2"><CheckCircle size={16} /> Turno Libre</div>
                     )}
                   </div>
                 </div>
               );
             })}
-            
-            {(!selectedAssistant.schedule?.[dayOfWeek] || selectedAssistant.schedule[dayOfWeek].length === 0) && (
-              <div className="p-8 text-center text-slate-500">
-                No tienes turnos programados para este día.
-              </div>
-            )}
           </div>
         </div>
       )}
 
       {viewMode === 'general' && (
         <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
-           <h3 className="text-lg font-semibold text-slate-800 p-6 border-b border-slate-100 bg-slate-50 flex items-center gap-2">
-             <Calendar size={20} className="text-blue-600" />
-             Agenda General - {DAYS_OF_WEEK[dayOfWeek]}
-           </h3>
+           <h3 className="text-lg font-semibold text-slate-800 p-6 border-b border-slate-100 bg-slate-50 flex items-center gap-2"><Calendar size={20} className="text-blue-600" /> Agenda General - {DAYS_OF_WEEK[dayOfWeek]}</h3>
            <div className="overflow-auto max-h-[70vh]">
              <table className="w-full min-w-max border-collapse relative">
                <thead>
                  <tr>
-                   <th className="p-3 bg-slate-100 border-b border-slate-200 text-left sticky left-0 top-0 z-30 shadow-[1px_1px_0_0_#e2e8f0] font-bold text-slate-700 w-24">Hora</th>
-                   {activeAssistants.map(ast => (
-                     <th key={ast.id} className="p-3 bg-slate-100 border-b border-slate-200 border-l border-slate-200 text-center font-semibold text-slate-700 min-w-[160px] sticky top-0 z-20 shadow-[0_1px_0_0_#e2e8f0]">
-                       {ast.name}
-                     </th>
-                   ))}
+                   <th className="p-3 bg-slate-100 border-b border-slate-200 text-left sticky left-0 top-0 z-30 font-bold text-slate-700 w-24">Hora</th>
+                   {activeAssistants.map(ast => <th key={ast.id} className="p-3 bg-slate-100 border-b border-slate-200 border-l border-slate-200 text-center font-semibold text-slate-700 min-w-[160px] sticky top-0 z-20">{ast.name}</th>)}
                  </tr>
                </thead>
                <tbody>
                  {slots.map(slot => (
                    <tr key={slot} className="hover:bg-slate-50/50">
-                     <td className="p-3 border-b border-slate-100 text-slate-700 font-medium sticky left-0 bg-white z-10 shadow-[1px_0_0_0_#f1f5f9]">{slot}</td>
+                     <td className="p-3 border-b border-slate-100 text-slate-700 font-medium sticky left-0 bg-white z-10">{slot}</td>
                      {activeAssistants.map(ast => {
                        const isWorking = isTimeInAnyBlock(slot, ast.schedule[dayOfWeek]);
                        const booking = bookings.find(b => b.date === selectedDate && b.time === slot && b.assistantId === ast.id);
-                       
                        return (
                          <td key={ast.id} className="p-2 border-b border-l border-slate-100 text-center">
-                           {!isWorking ? (
-                             <div className="text-slate-300 flex justify-center"><XCircle size={16}/></div>
-                           ) : booking ? (
+                           {!isWorking ? <div className="text-slate-300 flex justify-center"><XCircle size={16}/></div> : booking ? (
                              <div className="bg-blue-100 border border-blue-200 text-blue-900 rounded p-1.5 text-xs text-left shadow-sm">
                                <div className="font-bold flex items-center gap-1 mb-1 truncate"><Stethoscope size={12}/> {booking.doctorName}</div>
                                <div className="opacity-90 flex items-center gap-1 truncate"><User size={12}/> {booking.patientName}</div>
-                               {booking.comments && <div className="opacity-80 italic mt-1 truncate" title={booking.comments}>- {booking.comments}</div>}
                              </div>
-                           ) : (
-                             <div className="text-green-500 font-medium text-xs bg-green-50 border border-green-100 rounded p-2 flex items-center justify-center gap-1">
-                               <CheckCircle size={14}/> Libre
-                             </div>
-                           )}
+                           ) : <div className="text-green-500 font-medium text-xs bg-green-50 border border-green-100 rounded p-2 flex items-center justify-center gap-1"><CheckCircle size={14}/> Libre</div>}
                          </td>
                        );
                      })}
@@ -830,9 +756,6 @@ const AssistantView = ({ assistants, bookings }) => {
                  ))}
                </tbody>
              </table>
-             {activeAssistants.length === 0 && (
-               <div className="p-8 text-center text-slate-500">Ninguna asistente tiene turnos asignados este día.</div>
-             )}
            </div>
         </div>
       )}
@@ -846,201 +769,142 @@ export default function App() {
   const [assistants, setAssistants] = useState([]);
   const [doctors, setDoctors] = useState([]);
   const [bookings, setBookings] = useState([]);
+  const [halfHourlyBlocksState, setHalfHourlyBlocksState] = useState([]);
   const [loading, setLoading] = useState(true);
   const processingIds = useRef(new Set());
 
   useEffect(() => {
     const initAuth = async () => {
       try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
-        }
-      } catch (error) {
-        console.error("Auth error:", error);
-      }
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) await signInWithCustomToken(auth, __initial_auth_token);
+        else await signInAnonymously(auth);
+      } catch (error) { console.error("Auth error:", error); }
     };
     initAuth();
-
-    const unsubscribe = onAuthStateChanged(auth, (usr) => {
-      setUser(usr);
-    });
+    const unsubscribe = onAuthStateChanged(auth, (usr) => setUser(usr));
     return () => unsubscribe();
   }, []);
 
-  // Fetch Data (AQUÍ ESTÁ EL VIGILANTE DE FIREBASE)
+  // Fetch basic data
   useEffect(() => {
     if (!user) return;
-
     const asstRef = collection(db, 'artifacts', appId, 'public', 'data', 'assistants');
-    const unsubAssistants = onSnapshot(asstRef, (snapshot) => {
-      const astData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      astData.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-      setAssistants(astData);
-    }, (error) => console.error(error));
-
+    const unsubAssistants = onSnapshot(asstRef, (snap) => setAssistants(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a,b) => (a.name||'').localeCompare(b.name||''))));
     const docRef = collection(db, 'artifacts', appId, 'public', 'data', 'doctors');
-    const unsubDoctors = onSnapshot(docRef, (snapshot) => {
-      const docData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      docData.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-      setDoctors(docData);
-    }, (error) => console.error(error));
+    const unsubDoctors = onSnapshot(docRef, (snap) => setDoctors(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a,b) => (a.name||'').localeCompare(b.name||''))));
+    const hhStateRef = collection(db, 'artifacts', appId, 'public', 'data', 'half_hourly_blocks_state');
+    const unsubHHState = onSnapshot(hhStateRef, (snap) => setHalfHourlyBlocksState(snap.docs.map(doc => ({ id: doc.id, ...doc.data() }))));
 
     const bookRef = collection(db, 'artifacts', appId, 'public', 'data', 'bookings');
     const unsubBookings = onSnapshot(bookRef, (snapshot) => {
       let expandedBookings = [];
-      
       snapshot.docs.forEach(docSnap => {
         const data = docSnap.data();
-        const docId = docSnap.id;
-        const idEstado = Number(data.id_estado);
-
-        // ==== INICIO DEL VIGILANTE (Sincronización Inteligente) ====
-        if (data.dentalink_bloqueo_id && !data.bloqueo_anulado) {
-            
-            // 1. ¿Cancelaron o anularon la cita en Dentalink?
-            if (idEstado === 1 || idEstado === 8 || idEstado === 14) {
-                notifyDentalinkBlock({ ...data, id: docId }, { name: data.assistantName }, 'anular', idEstado);
-                updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', docId), { bloqueo_anulado: true });
-                return; 
-            }
-
-            // 2. ¿Movieron la fecha, la hora, o cambiaron la duración?
-            const safeCurrentDate = safeFormatDate(data.date);
-            const dateChanged = data.last_synced_date && safeCurrentDate !== data.last_synced_date;
-            const timeChanged = data.last_synced_time && data.time !== data.last_synced_time;
-            const durationChanged = data.last_synced_duration && data.duration !== data.last_synced_duration;
-
-            if (dateChanged || timeChanged) {
-                // Estrategia a prueba de fallos: Anulamos el viejo (Estado 1) para liberar espacio REAL
-                // y luego limpiamos el ID para que el Re-creador haga uno nuevo sin chocar.
-                notifyDentalinkBlock({ ...data, id: docId, date: safeCurrentDate }, { name: data.assistantName }, 'anular', 1);
-                
-                updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', docId), { 
-                    dentalink_bloqueo_id: null, 
-                    last_synced_time: data.time,
-                    last_synced_date: safeCurrentDate,
-                    last_synced_duration: data.duration
-                });
-            } else if (durationChanged) {
-                // Solo cambió duración: el PUT de Dentalink SÍ lo soporta
-                notifyDentalinkBlock({ ...data, id: docId, date: safeCurrentDate }, { name: data.assistantName }, 'editar', ID_ESTADO_BLOQUEO);
-                updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', docId), { 
-                    last_synced_duration: data.duration 
-                });
-            }
-        }
-
-        if (idEstado === 1 || idEstado === 8 || idEstado === 14) return; 
-        // ==== FIN DEL VIGILANTE ====
-
+        if (data.bloqueo_anulado) return; 
+        
         const fechaCorregida = safeFormatDate(data.date);
         const durationNum = Number(data.duration) || 15;
-        const baseBooking = { id: docId, ...data, date: fechaCorregida, duration: durationNum };
+        const baseBooking = { id: docSnap.id, ...data, date: fechaCorregida, duration: durationNum };
         
         if (baseBooking.time) {
           const slotsCovered = getSlotsForDuration(baseBooking.time, durationNum);
           slotsCovered.forEach((slotTime, index) => {
-            expandedBookings.push({
-              ...baseBooking,
-              time: slotTime,
-              isFirstSlot: index === 0,
-              virtualId: `${docId}_${index}`
-            });
+            expandedBookings.push({ ...baseBooking, time: slotTime, isFirstSlot: index === 0, virtualId: `${docSnap.id}_${index}` });
           });
         } else {
           expandedBookings.push(baseBooking);
         }
       });
-      
       setBookings(expandedBookings);
       setLoading(false);
-    }, (error) => console.error(error));
+    });
 
-    return () => {
-      unsubAssistants();
-      unsubDoctors();
-      unsubBookings();
-    };
+    return () => { unsubAssistants(); unsubDoctors(); unsubBookings(); unsubHHState(); };
   }, [user]);
 
-  // AUTO-ASIGNACIÓN INTELIGENTE 
+  // MOTOR DE AUTO-ASIGNACIÓN CONTINUO
   useEffect(() => {
     if (assistants.length === 0 || bookings.length === 0) return;
-
+    
     const unassignedBookings = bookings.filter(b => b.assistantId === 'pendiente' && b.isFirstSlot !== false);
+    
+    if (unassignedBookings.length > 0) {
+        const booking = unassignedBookings[0];
+        
+        if (processingIds.current.has(booking.id + '_assign')) return;
+        processingIds.current.add(booking.id + '_assign');
 
-    unassignedBookings.forEach(async (booking) => {
-      if (processingIds.current.has(booking.id)) return;
-      processingIds.current.add(booking.id);
+        const requiredSlots = getSlotsForDuration(booking.time, booking.duration);
+        const dayOfWeek = getDayOfWeek(booking.date);
 
-      const requiredSlots = getSlotsForDuration(booking.time, booking.duration);
-      const dayOfWeek = getDayOfWeek(booking.date);
+        const availableAssistants = assistants.filter(ast => {
+           const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek]));
+           if (!workingAll) return false;
+           const bookedInAny = requiredSlots.some(slot => bookings.some(b => b.date === booking.date && b.time === slot && b.assistantId === ast.id && b.id !== booking.id));
+           return !bookedInAny;
+        });
 
-      const availableAssistants = assistants.filter(ast => {
-         const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek]));
-         if (!workingAll) return false;
-
-         const bookedInAny = requiredSlots.some(slot =>
-            bookings.some(b => b.date === booking.date && b.time === slot && b.assistantId === ast.id && b.id !== booking.id)
-         );
-         return !bookedInAny;
-      });
-
-      if (availableAssistants.length > 0) {
-         const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
-         try {
-           const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id);
-           await updateDoc(docRef, {
-             assistantId: assignedAssistant.id,
-             assistantName: assignedAssistant.name,
-             last_synced_date: safeFormatDate(booking.date),
-             last_synced_time: booking.time,
-             last_synced_duration: booking.duration
+        if (availableAssistants.length > 0) {
+           const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
+           updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id), {
+               assistantId: assignedAssistant.id,
+               assistantName: assignedAssistant.name
+           }).then(() => {
+               processingIds.current.delete(booking.id + '_assign');
            });
-         } catch (err) {
-           console.error("Auto-assign error:", err);
-           processingIds.current.delete(booking.id);
-         }
-      } else {
-         setTimeout(() => {
-           processingIds.current.delete(booking.id);
-         }, 10000);
-      }
-    });
+        } else {
+           setTimeout(() => processingIds.current.delete(booking.id + '_assign'), 5000);
+        }
+    }
   }, [bookings, assistants]);
 
-  // EL RE-CREADOR CENTRAL
+  // EL CEREBRO DE BLOQUES FIJOS POR MEDIA HORA CON SEMÁFORO
   useEffect(() => {
-      if (bookings.length === 0) return;
+      if (bookings.length === 0 && halfHourlyBlocksState.length === 0) return;
       
-      const pendingBlocks = bookings.filter(b => 
-          b.assistantId && 
-          b.assistantId !== 'pendiente' && 
-          !b.dentalink_bloqueo_id && 
-          !b.bloqueo_anulado && 
-          b.isFirstSlot !== false 
-      );
-
-      pendingBlocks.forEach(async (booking) => {
-          if (processingIds.current.has(booking.id + '_create')) return;
-          processingIds.current.add(booking.id + '_create');
-
-          // Agregamos un ligero retraso de 1 segundo para asegurar que Dentalink liberó el espacio anterior
-          setTimeout(async () => {
-              await notifyDentalinkBlock(booking, { name: booking.assistantName }, 'crear', ID_ESTADO_BLOQUEO);
-              
-              setTimeout(() => {
-                  processingIds.current.delete(booking.id + '_create');
-              }, 8000);
-          }, 1000);
+      const computed = computeHalfHourlyBlocks(bookings, assistants);
+      
+      // 1. Detectar Bloques de 30 mins Nuevos o Modificados
+      computed.forEach(async (comp) => {
+          if(processingIds.current.has(comp.id)) return;
+          const existing = halfHourlyBlocksState.find(m => m.id === comp.id);
+          
+          if(!existing) {
+              // No existe en Dentalink: Crear bloque (POST)
+              processingIds.current.add(comp.id);
+              await notifyDentalinkHalfHourlyBlock(comp, 'crear', comp.id_estado);
+              setTimeout(() => processingIds.current.delete(comp.id), 5000);
+          } else {
+              // Ya existe: Revisar si los textos internos o el COLOR (id_estado) cambiaron
+              const propsChanged = existing.comments !== comp.comments || existing.id_estado !== comp.id_estado;
+              if (propsChanged) {
+                  processingIds.current.add(comp.id);
+                  // Usamos el ID del bloque viejo para editarle el comentario y/o el estado
+                  await notifyDentalinkHalfHourlyBlock({...comp, dentalink_bloqueo_id: existing.dentalink_bloqueo_id}, 'editar', comp.id_estado);
+                  await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'half_hourly_blocks_state', existing.id), {
+                      comments: comp.comments,
+                      id_estado: comp.id_estado
+                  });
+                  setTimeout(() => processingIds.current.delete(comp.id), 3000);
+              }
+          }
       });
-  }, [bookings]);
+      
+      // 2. Detectar Bloques Vacíos (Medias horas que se quedaron sin citas)
+      halfHourlyBlocksState.forEach(async (existing) => {
+          const stillExists = computed.find(c => c.id === existing.id);
+          if(!stillExists && !processingIds.current.has(existing.id)) {
+               processingIds.current.add(existing.id);
+               // Anular bloque en Dentalink y borrar de Firebase
+               await notifyDentalinkHalfHourlyBlock(existing, 'anular', 1);
+               await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'half_hourly_blocks_state', existing.id));
+               setTimeout(() => processingIds.current.delete(existing.id), 3000);
+          }
+      });
+      
+  }, [bookings, halfHourlyBlocksState, assistants]);
 
-  if (loading) {
-    return <div className="min-h-screen bg-slate-50 flex items-center justify-center text-blue-600 font-medium">Cargando Sistema...</div>;
-  }
+  if (loading) return <div className="min-h-screen bg-slate-50 flex items-center justify-center text-blue-600 font-medium">Cargando Sistema...</div>;
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 font-sans">
@@ -1050,30 +914,13 @@ export default function App() {
             <Stethoscope size={24} />
             <h1 className="text-xl font-bold tracking-tight">Molaria Assist<span className="text-blue-400 font-light">Hub</span></h1>
           </div>
-          
           <div className="flex bg-slate-100 p-1 rounded-lg">
-            <button 
-              onClick={() => setRole('admin')}
-              className={`px-3 py-1.5 text-sm rounded-md transition-all flex items-center gap-1 ${role === 'admin' ? 'bg-white shadow-sm text-blue-700 font-medium' : 'text-slate-600 hover:text-slate-900'}`}
-            >
-              <Shield size={16} /> Admin
-            </button>
-            <button 
-              onClick={() => setRole('doctor')}
-              className={`px-3 py-1.5 text-sm rounded-md transition-all flex items-center gap-1 ${role === 'doctor' ? 'bg-white shadow-sm text-blue-700 font-medium' : 'text-slate-600 hover:text-slate-900'}`}
-            >
-              <Stethoscope size={16} /> Doctor
-            </button>
-            <button 
-              onClick={() => setRole('assistant')}
-              className={`px-3 py-1.5 text-sm rounded-md transition-all flex items-center gap-1 ${role === 'assistant' ? 'bg-white shadow-sm text-blue-700 font-medium' : 'text-slate-600 hover:text-slate-900'}`}
-            >
-              <User size={16} /> Asistente
-            </button>
+            <button onClick={() => setRole('admin')} className={`px-3 py-1.5 text-sm rounded-md transition-all flex items-center gap-1 ${role === 'admin' ? 'bg-white shadow-sm text-blue-700 font-medium' : 'text-slate-600 hover:text-slate-900'}`}><Shield size={16} /> Admin</button>
+            <button onClick={() => setRole('doctor')} className={`px-3 py-1.5 text-sm rounded-md transition-all flex items-center gap-1 ${role === 'doctor' ? 'bg-white shadow-sm text-blue-700 font-medium' : 'text-slate-600 hover:text-slate-900'}`}><Stethoscope size={16} /> Doctor</button>
+            <button onClick={() => setRole('assistant')} className={`px-3 py-1.5 text-sm rounded-md transition-all flex items-center gap-1 ${role === 'assistant' ? 'bg-white shadow-sm text-blue-700 font-medium' : 'text-slate-600 hover:text-slate-900'}`}><User size={16} /> Asistente</button>
           </div>
         </div>
       </header>
-
       <main className="max-w-6xl mx-auto px-4 py-8">
         {role === 'admin' && <AdminView assistants={assistants} doctors={doctors} />}
         {role === 'doctor' && <DoctorView assistants={assistants} bookings={bookings} doctors={doctors} />}
