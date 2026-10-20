@@ -89,7 +89,7 @@ const notifyDentalinkBlock = async (booking, assistant, action = 'crear', newEst
             id_estado: newEstado, 
             id_dentista: ID_DENTISTA_ASISTENTE, 
             fecha: booking.date,
-            hora_inicio: booking.time,
+            hora_o: booking.time,
             hora_fin: calculateEndTime(booking.time, booking.duration),
             duracion: booking.duration,
             comentarios: `[${assistant.name}] Apoyando a: ${booking.doctorName} (Px: ${booking.patientName})`
@@ -269,7 +269,7 @@ const AdminView = ({ assistants, doctors }) => {
                   </select>
                 </div>
                 <div>
-                  <label className="block text-xs text-slate-500 mb-1">Hora Inicio</label>
+                  <label className="block text-xs text-slate-500 mb-1">Hora o</label>
                   <input type="time" value={blockStart} onChange={(e) => setBlockStart(e.target.value)} step="900" className="w-full p-2 border border-slate-300 rounded-lg outline-none" />
                 </div>
                 <div>
@@ -528,7 +528,7 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
         await updateDoc(docRef, {
           assistantId: assignedAssistant.id,
           assistantName: assignedAssistant.name,
-          // Guardamos el estado inicial para comparar si la mueven después
+          // Guardamos el estado al para comparar si la mueven después
           last_synced_date: booking.date,
           last_synced_time: booking.time,
           last_synced_duration: booking.duration
@@ -896,45 +896,38 @@ export default function App() {
         const docId = docSnap.id;
         const idEstado = Number(data.id_estado);
 
-        // ==== INICIO DEL VIGILANTE (Sincronización Inteligente) ====
+        
+       // ==== INICIO DEL VIGILANTE (Sincronización Inteligente) ====
         if (data.dentalink_bloqueo_id && !data.bloqueo_anulado) {
             
-            // 1. ¿Cancelaron o anularon la cita en Dentalink?
+            const idEstado = Number(data.id_estado);
+
+            // 1. ¿Cancelaron o anularon la cita en Dentalink? (Manejo correcto de anulaciones)
             if (idEstado === 1 || idEstado === 8 || idEstado === 14) {
                 notifyDentalinkBlock({ ...data, id: docId }, { name: data.assistantName }, 'anular', idEstado);
                 updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', docId), { bloqueo_anulado: true });
                 return; // Ocultamos del calendario visual
             }
 
-            // 2. ¿Movieron la fecha, la hora, o cambiaron la duración?
+            // 2. ¿Movieron la fecha, la hora, o cambiaron la duración? (Todo se maneja como 'editar' con PUT)
             const dateChanged = data.last_synced_date && data.date !== data.last_synced_date;
             const timeChanged = data.last_synced_time && data.time !== data.last_synced_time;
             const durationChanged = data.last_synced_duration && data.duration !== data.last_synced_duration;
 
-            if (dateChanged || timeChanged) {
-                // Como cambió fecha/hora, Dentalink a veces falla con PUT. 
-                // Estrategia: Anular el viejo (Estado 14) y borrar el ID para que el Re-Creador haga uno nuevo.
-                notifyDentalinkBlock({ ...data, id: docId }, { name: data.assistantName }, 'anular', 14);
+            if (dateChanged || timeChanged || durationChanged) {
+                // Notificamos a n8n usando la acción 'editar'. Esto enrutará al nodo PUT.
+                // IMPORTANTE: Asegúrate de que el nodo PUT en n8n esté configurado para enviar fecha, hora_inicio y duracion.
+                notifyDentalinkBlock({ ...data, id: docId }, { name: data.assistantName }, 'editar', ID_ESTADO_BLOQUEO);
                 
+                // Actualizamos los valores de control en Firebase
                 updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', docId), { 
-                    dentalink_bloqueo_id: null, // Lo dejamos en null para forzar un POST nuevo
                     last_synced_time: data.time,
                     last_synced_date: data.date,
                     last_synced_duration: data.duration
                 });
-            } else if (durationChanged) {
-                // Solo cambió duración. Podemos usar PUT tranquilamente para actualizar.
-                notifyDentalinkBlock({ ...data, id: docId }, { name: data.assistantName }, 'editar', ID_ESTADO_BLOQUEO);
-                updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', docId), { 
-                    last_synced_duration: data.duration 
-                });
             }
         }
-
-        // Si ya está cancelada, no la procesamos para el calendario
-        if (idEstado === 1 || idEstado === 8 || idEstado === 14) {
-            return; 
-        }
+        
         // ==== FIN DEL VIGILANTE ====
 
         
