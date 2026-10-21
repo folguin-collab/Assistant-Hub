@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+def generate_sync_app():
+    code = """import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc, addDoc, updateDoc } from 'firebase/firestore';
-import { Calendar, Clock, User, UserPlus, Trash2, CheckCircle, XCircle, AlertCircle, Shield, Stethoscope, Users, Pencil, FileText } from 'lucide-react';
+import { Calendar, Clock, User, UserPlus, Trash2, CheckCircle, XCircle, AlertCircle, Shield, Stethoscope, Users, Pencil, FileText, LayoutGrid, RefreshCw } from 'lucide-react';
 
 // --- FIREBASE INITIALIZATION ---
 const firebaseConfig = {
@@ -17,6 +18,10 @@ const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'dental-assist-app-id';
+
+// --- CONFIGURACIÓN DE INTEGRACIÓN ---
+// Aquí pondrás la URL del NUEVO webhook de n8n que se encargará de traer la agenda completa de Dentalink
+const N8N_SYNC_AGENDA_WEBHOOK_URL = ""; 
 
 // --- UTILITY FUNCTIONS ---
 const generateTimeSlots = (startHour = 8, endHour = 20) => {
@@ -456,7 +461,10 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
         <div className="flex flex-col md:flex-row gap-4 items-end">
           <div className="flex-1 w-full">
             <label className="block text-sm font-medium text-slate-600 mb-1">Doctor(a)</label>
-            <input type="text" value={doctorId} onChange={(e) => setDoctorId(e.target.value)} placeholder="Ej. Dr. Pérez" className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white" />
+            <input list="doctors-datalist" type="text" value={doctorId} onChange={(e) => setDoctorId(e.target.value)} placeholder="Ej. Dr. Pérez" className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white" />
+            <datalist id="doctors-datalist">
+                {doctors.map(d => <option key={d.id} value={d.name} />)}
+            </datalist>
           </div>
           <div className="flex-1 w-full">
             <label className="block text-sm font-medium text-slate-600 mb-1">Fecha de Consulta</label>
@@ -481,7 +489,7 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
       </div>
 
       <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
-        <h3 className="text-lg font-semibold text-slate-800 p-6 border-b border-slate-100 bg-slate-50">Disponibilidad para el {selectedDate}</h3>
+        <h3 className="text-lg font-semibold text-slate-800 p-6 border-b border-slate-100 bg-slate-50">Citas Pendientes de Asignación - {selectedDate}</h3>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 p-6">
           {slots.map(slot => {
             const workingAssistants = assistants.filter(ast => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek]));
@@ -525,7 +533,7 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
                     );
                   })}
                 </div>
-                {availableCount > 0 && <button onClick={() => handleBook(slot)} className="w-full py-2 bg-slate-200 text-slate-700 rounded-lg text-sm font-medium hover:bg-slate-300 transition-colors shadow-sm mt-auto">Agendar Asistente</button>}
+                {availableCount > 0 && <button onClick={() => handleBook(slot)} className="w-full py-2 bg-slate-200 text-slate-700 rounded-lg text-sm font-medium hover:bg-slate-300 transition-colors shadow-sm mt-auto">Agendar Asistente Manualmente</button>}
               </div>
             );
           })}
@@ -535,10 +543,11 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
   );
 };
 
-const AssistantView = ({ assistants, bookings }) => {
+const AssistantView = ({ assistants, bookings, doctors, globalAgenda }) => {
   const [selectedAssistantId, setSelectedAssistantId] = useState('');
   const [selectedDate, setSelectedDate] = useState(getTodayString());
-  const [viewMode, setViewMode] = useState('personal'); 
+  const [viewMode, setViewMode] = useState('personal'); // personal, assistants, doctors
+  const [isSyncing, setIsSyncing] = useState(false);
   const slots = useMemo(() => generateTimeSlots(8, 20), []);
 
   useEffect(() => {
@@ -550,6 +559,39 @@ const AssistantView = ({ assistants, bookings }) => {
   const selectedAssistant = assistants.find(a => a.id === selectedAssistantId);
   const dayOfWeek = getDayOfWeek(selectedDate);
   const activeAssistants = assistants.filter(ast => ast.schedule?.[dayOfWeek] && ast.schedule[dayOfWeek].length > 0);
+
+  // Computed list of doctors for the Global Agenda (combines configured doctors + any doctor that has a booking today in global)
+  const activeDoctorsNames = useMemo(() => {
+    const names = new Set(doctors.map(d => d.name));
+    globalAgenda.forEach(b => {
+        if (b.date === selectedDate && b.doctorName) {
+            names.add(b.doctorName);
+        }
+    });
+    return Array.from(names).sort();
+  }, [doctors, globalAgenda, selectedDate]);
+
+  const handleSyncAgenda = async () => {
+      if (!N8N_SYNC_AGENDA_WEBHOOK_URL) {
+          alert("Falta configurar la URL del Webhook de n8n para la sincronización.");
+          return;
+      }
+      setIsSyncing(true);
+      try {
+          // Dispara el webhook de n8n pasándole la fecha seleccionada
+          await fetch(N8N_SYNC_AGENDA_WEBHOOK_URL, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ fecha: selectedDate })
+          });
+          // Simulamos un retraso para mostrar el estado de "Cargando" mientras n8n actualiza Firebase
+          setTimeout(() => setIsSyncing(false), 3000);
+      } catch (err) {
+          console.error("Error syncing agenda:", err);
+          setIsSyncing(false);
+          alert("Hubo un error al conectar con n8n.");
+      }
+  };
 
   return (
     <div className="space-y-6">
@@ -567,9 +609,10 @@ const AssistantView = ({ assistants, bookings }) => {
         </div>
       </div>
 
-      <div className="flex gap-2 bg-white p-2 rounded-xl shadow-sm border border-slate-100">
-        <button onClick={() => setViewMode('personal')} className={`flex-1 py-2 px-4 rounded-lg font-medium transition-colors flex items-center justify-center gap-2 ${viewMode === 'personal' ? 'bg-blue-600 text-white' : 'bg-transparent text-slate-600 hover:bg-slate-50'}`}><User size={18} /> Mi Agenda</button>
-        <button onClick={() => setViewMode('general')} className={`flex-1 py-2 px-4 rounded-lg font-medium transition-colors flex items-center justify-center gap-2 ${viewMode === 'general' ? 'bg-blue-600 text-white' : 'bg-transparent text-slate-600 hover:bg-slate-50'}`}><Users size={18} /> Agenda General</button>
+      <div className="flex flex-col md:flex-row gap-2 bg-white p-2 rounded-xl shadow-sm border border-slate-100 overflow-x-auto">
+        <button onClick={() => setViewMode('personal')} className={`flex-1 min-w-[150px] py-2 px-4 rounded-lg font-medium transition-colors flex items-center justify-center gap-2 ${viewMode === 'personal' ? 'bg-blue-600 text-white' : 'bg-transparent text-slate-600 hover:bg-slate-50'}`}><User size={18} /> Mi Agenda</button>
+        <button onClick={() => setViewMode('assistants')} className={`flex-1 min-w-[150px] py-2 px-4 rounded-lg font-medium transition-colors flex items-center justify-center gap-2 ${viewMode === 'assistants' ? 'bg-blue-600 text-white' : 'bg-transparent text-slate-600 hover:bg-slate-50'}`}><Users size={18} /> Citas con Asistencia</button>
+        <button onClick={() => setViewMode('doctors')} className={`flex-1 min-w-[150px] py-2 px-4 rounded-lg font-medium transition-colors flex items-center justify-center gap-2 ${viewMode === 'doctors' ? 'bg-indigo-600 text-white' : 'bg-transparent text-slate-600 hover:bg-slate-50'}`}><LayoutGrid size={18} /> Agenda Global Completa</button>
       </div>
 
       {viewMode === 'personal' && selectedAssistant && (
@@ -607,9 +650,9 @@ const AssistantView = ({ assistants, bookings }) => {
         </div>
       )}
 
-      {viewMode === 'general' && (
+      {viewMode === 'assistants' && (
         <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
-           <h3 className="text-lg font-semibold text-slate-800 p-6 border-b border-slate-100 bg-slate-50 flex items-center gap-2"><Calendar size={20} className="text-blue-600" /> Agenda General - {DAYS_OF_WEEK[dayOfWeek]}</h3>
+           <h3 className="text-lg font-semibold text-slate-800 p-6 border-b border-slate-100 bg-slate-50 flex items-center gap-2"><Calendar size={20} className="text-blue-600" /> Agenda de Asistentes - {DAYS_OF_WEEK[dayOfWeek]}</h3>
            <div className="overflow-auto max-h-[70vh]">
              <table className="w-full min-w-max border-collapse relative">
                <thead>
@@ -648,6 +691,76 @@ const AssistantView = ({ assistants, bookings }) => {
            </div>
         </div>
       )}
+
+      {viewMode === 'doctors' && (
+        <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
+           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center p-6 border-b border-slate-100 bg-indigo-50 gap-4">
+               <h3 className="text-lg font-semibold text-slate-800 flex items-center gap-2"><LayoutGrid size={20} className="text-indigo-600" /> Agenda Global (Dentalink) - {DAYS_OF_WEEK[dayOfWeek]}</h3>
+               <button onClick={handleSyncAgenda} disabled={isSyncing} className="bg-indigo-600 disabled:bg-indigo-300 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition-colors font-medium text-sm flex items-center gap-2 shadow-sm">
+                  <RefreshCw size={16} className={isSyncing ? 'animate-spin' : ''} />
+                  {isSyncing ? 'Sincronizando...' : 'Actualizar Agenda'}
+               </button>
+           </div>
+           
+           <div className="overflow-auto max-h-[70vh]">
+             <table className="w-full min-w-max border-collapse relative table-fixed">
+               <thead>
+                 <tr>
+                   <th className="p-2 bg-slate-100 border-b border-slate-200 text-center sticky left-0 top-0 z-30 font-bold text-slate-700 w-20 shadow-[1px_0_0_0_#e2e8f0]">Hora</th>
+                   {activeDoctorsNames.map(docName => <th key={docName} className="p-2 bg-slate-100 border-b border-slate-200 border-l border-slate-200 text-center font-semibold text-slate-700 min-w-[140px] w-48 sticky top-0 z-20 truncate" title={docName}>{docName}</th>)}
+                 </tr>
+               </thead>
+               <tbody>
+                 {slots.map(slot => (
+                   <tr key={slot} className="hover:bg-slate-50/50 h-8">
+                     <td className="p-1 border-b border-slate-100 text-slate-700 font-medium sticky left-0 bg-white z-10 text-xs text-center shadow-[1px_0_0_0_#f1f5f9]">{slot}</td>
+                     {activeDoctorsNames.map(docName => {
+                       // En la agenda global buscamos de la colección 'globalAgenda' (todas las citas)
+                       const globalAppt = globalAgenda.find(b => b.date === selectedDate && b.time === slot && b.doctorName === docName);
+                       
+                       if (!globalAppt) return <td key={docName} className="p-0 border-b border-l border-slate-100"></td>;
+
+                       // Verificamos si, además, esta cita requiere asistente revisando la colección 'bookings'
+                       const requiresAssistant = bookings.find(b => b.date === selectedDate && b.time === slot && b.doctorName === docName && !b.isSecondSlot);
+                       const isUnassigned = requiresAssistant ? (requiresAssistant.assistantId === 'pendiente') : false;
+                       
+                       let bgColor = "bg-sky-50";
+                       let borderColor = "border-sky-200";
+                       let textColor = "text-sky-900";
+                       
+                       if (requiresAssistant) {
+                           bgColor = isUnassigned ? "bg-red-50" : "bg-indigo-50";
+                           borderColor = isUnassigned ? "border-red-300" : "border-indigo-300";
+                           textColor = isUnassigned ? "text-red-900" : "text-indigo-900";
+                       }
+
+                       return (
+                         <td key={docName} className="p-0 border-l border-slate-100 align-top">
+                           <div className={`w-full h-full ${bgColor} border-l-4 ${borderColor} ${globalAppt.isFirstSlot ? 'border-t border-t-slate-200' : ''}`}>
+                               {globalAppt.isFirstSlot && (
+                                   <div className={`p-1.5 flex flex-col justify-start h-full ${textColor}`}>
+                                       <div className="font-bold text-[11px] leading-tight truncate" title={globalAppt.patientName}>{globalAppt.patientName}</div>
+                                       {globalAppt.comments && (
+                                           <div className="text-[10px] opacity-80 mt-0.5 leading-tight truncate" title={globalAppt.comments}>{globalAppt.comments}</div>
+                                       )}
+                                       {requiresAssistant && (
+                                           <div className="text-[9px] opacity-70 font-bold mt-0.5 truncate">
+                                               {isUnassigned ? '⚠️ Faltan Manos' : `✔ Asist: ${requiresAssistant.assistantName}`}
+                                           </div>
+                                       )}
+                                   </div>
+                               )}
+                           </div>
+                         </td>
+                       );
+                     })}
+                   </tr>
+                 ))}
+               </tbody>
+             </table>
+           </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -658,6 +771,7 @@ const App = () => {
   const [assistants, setAssistants] = useState([]);
   const [doctors, setDoctors] = useState([]);
   const [bookings, setBookings] = useState([]);
+  const [globalAgenda, setGlobalAgenda] = useState([]);
   const [loading, setLoading] = useState(true);
   const processingIds = useRef(new Set());
 
@@ -673,7 +787,7 @@ const App = () => {
     return () => unsubscribe();
   }, []);
 
-  // Fetch basic data & EL VIGILANTE INTERNO
+  // Fetch data
   useEffect(() => {
     if (!user) return;
     const asstRef = collection(db, 'artifacts', appId, 'public', 'data', 'assistants');
@@ -681,6 +795,7 @@ const App = () => {
     const docRef = collection(db, 'artifacts', appId, 'public', 'data', 'doctors');
     const unsubDoctors = onSnapshot(docRef, (snap) => setDoctors(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a,b) => (a.name||'').localeCompare(b.name||''))));
 
+    // COBERTURA 1: Citas que requieren asistente (Robot Activo)
     const bookRef = collection(db, 'artifacts', appId, 'public', 'data', 'bookings');
     const unsubBookings = onSnapshot(bookRef, (snapshot) => {
       let expandedBookings = [];
@@ -688,7 +803,7 @@ const App = () => {
         const data = docSnap.data();
         const idEstado = Number(data.id_estado);
 
-        // 1. VIGILANTE: Limpieza de cancelados/no confirmados/anulados (1, 8, 14)
+        // VIGILANTE DE LIMPIEZA
         if (idEstado === 1 || idEstado === 8 || idEstado === 14 || data.bloqueo_anulado) {
            deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', docSnap.id)).catch(()=>{});
            return;
@@ -697,7 +812,7 @@ const App = () => {
         const fechaCorregida = safeFormatDate(data.date);
         const durationNum = Number(data.duration) || 15;
         
-        // 2. VIGILANTE: Reprocesar si Dentalink movió la cita de hora o fecha
+        // VIGILANTE DE REPROGRAMACIÓN
         const isAssigned = (data.assistantId && data.assistantId !== 'pendiente') || (data.assistantId2 && data.assistantId2 !== 'pendiente');
         const changedDate = data.last_synced_date && data.last_synced_date !== fechaCorregida;
         const changedTime = data.last_synced_time && data.last_synced_time !== data.time;
@@ -716,50 +831,56 @@ const App = () => {
              return; 
         }
         
-        // Generación de tarjetas visuales
         const baseBooking = { id: docSnap.id, ...data, date: fechaCorregida, duration: durationNum };
         const isDoble = typeof data.comments === 'string' && data.comments.toLowerCase().includes('#doble');
         
         if (baseBooking.time) {
           const slotsCovered = getSlotsForDuration(baseBooking.time, durationNum);
           slotsCovered.forEach((slotTime, index) => {
-            
             expandedBookings.push({ 
-                ...baseBooking, 
-                time: slotTime, 
-                isFirstSlot: index === 0, 
-                virtualId: `${docSnap.id}_1_${index}`,
-                assistantId: data.assistantId || 'pendiente',
-                assistantName: data.assistantName || 'Por Asignar',
-                dbKeyId: 'assistantId',
-                dbKeyName: 'assistantName',
-                siblingIdValue: data.assistantId2 
+                ...baseBooking, time: slotTime, isFirstSlot: index === 0, virtualId: `${docSnap.id}_1_${index}`,
+                assistantId: data.assistantId || 'pendiente', assistantName: data.assistantName || 'Por Asignar',
+                dbKeyId: 'assistantId', dbKeyName: 'assistantName', siblingIdValue: data.assistantId2 
             });
 
             if (isDoble) {
                 expandedBookings.push({ 
-                    ...baseBooking, 
-                    time: slotTime, 
-                    isFirstSlot: index === 0, 
-                    virtualId: `${docSnap.id}_2_${index}`,
-                    assistantId: data.assistantId2 || 'pendiente',
-                    assistantName: data.assistantName2 || 'Por Asignar',
-                    dbKeyId: 'assistantId2',
-                    dbKeyName: 'assistantName2',
-                    siblingIdValue: data.assistantId 
+                    ...baseBooking, time: slotTime, isFirstSlot: index === 0, virtualId: `${docSnap.id}_2_${index}`,
+                    assistantId: data.assistantId2 || 'pendiente', assistantName: data.assistantName2 || 'Por Asignar',
+                    dbKeyId: 'assistantId2', dbKeyName: 'assistantName2', siblingIdValue: data.assistantId 
                 });
             }
           });
         }
       });
       setBookings(expandedBookings);
+    });
+
+    // COBERTURA 2: Agenda Global Completa (Visual Espejo)
+    const agendaRef = collection(db, 'artifacts', appId, 'public', 'data', 'agenda_global');
+    const unsubGlobalAgenda = onSnapshot(agendaRef, (snapshot) => {
+      let expandedGlobal = [];
+      snapshot.docs.forEach(docSnap => {
+        const data = docSnap.data();
+        const fechaCorregida = safeFormatDate(data.date);
+        const durationNum = Number(data.duration) || 15;
+        const baseBooking = { id: docSnap.id, ...data, date: fechaCorregida, duration: durationNum };
+        
+        if (baseBooking.time) {
+          const slotsCovered = getSlotsForDuration(baseBooking.time, durationNum);
+          slotsCovered.forEach((slotTime, index) => {
+            expandedGlobal.push({ ...baseBooking, time: slotTime, isFirstSlot: index === 0, virtualId: `${docSnap.id}_global_${index}` });
+          });
+        }
+      });
+      setGlobalAgenda(expandedGlobal);
       setLoading(false);
     });
 
-    return () => { unsubAssistants(); unsubDoctors(); unsubBookings(); };
+    return () => { unsubAssistants(); unsubDoctors(); unsubBookings(); unsubGlobalAgenda(); };
   }, [user]);
 
-  // MOTOR DE AUTO-ASIGNACIÓN
+  // MOTOR DE AUTO-ASIGNACIÓN (Solo para la colección 'bookings')
   useEffect(() => {
     if (assistants.length === 0 || bookings.length === 0) return;
     
@@ -822,10 +943,15 @@ const App = () => {
       <main className="max-w-6xl mx-auto px-4 py-8">
         {role === 'admin' && <AdminView assistants={assistants} doctors={doctors} />}
         {role === 'doctor' && <DoctorView assistants={assistants} bookings={bookings} doctors={doctors} />}
-        {role === 'assistant' && <AssistantView assistants={assistants} bookings={bookings} />}
+        {role === 'assistant' && <AssistantView assistants={assistants} bookings={bookings} doctors={doctors} globalAgenda={globalAgenda} />}
       </main>
     </div>
   );
 }
 
 export default App;
+"""
+    with open('App.jsx', 'w') as f:
+        f.write(code)
+
+generate_sync_app()
