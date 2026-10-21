@@ -652,7 +652,7 @@ const AssistantView = ({ assistants, bookings }) => {
   );
 };
 
-export default function App() {
+const App = () => {
   const [user, setUser] = useState(null);
   const [role, setRole] = useState('doctor'); 
   const [assistants, setAssistants] = useState([]);
