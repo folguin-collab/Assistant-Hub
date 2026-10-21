@@ -19,7 +19,7 @@ const db = getFirestore(app);
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'dental-assist-app-id';
 
 // --- CONFIGURACIÓN DE INTEGRACIÓN ---
-const N8N_SYNC_AGENDA_WEBHOOK_URL = "https://automatizaciones-n8n.ani4cn.easypanel.host/webhook-test/sincronizar-agenda-global"; 
+const N8N_SYNC_AGENDA_WEBHOOK_URL = "https://automatizaciones-n8n.ani4cn.easypanel.host/webhook/sincronizar-agenda-global"; 
 
 // --- UTILITY FUNCTIONS ---
 const generateTimeSlots = (startHour = 8, endHour = 20) => {
@@ -1070,6 +1070,15 @@ const App = () => {
   const [globalAgenda, setGlobalAgenda] = useState([]);
   const [rotations, setRotations] = useState([]);
   const [loading, setLoading] = useState(true);
+
+  const handleSaveRotation = async (rotationData) => {
+    try {
+      const collRef = collection(db, 'artifacts', appId, 'public', 'data', 'rotations');
+      await addDoc(collRef, rotationData);
+    } catch (err) {
+      console.error("Error saving rotation:", err);
+    }
+  };
 
   useEffect(() => {
     const initAuth = async () => {
