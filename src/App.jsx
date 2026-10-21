@@ -376,6 +376,18 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
     if (!patientName.trim()) { setBookingError('⚠️ Ingresa el nombre del paciente.'); setTimeout(() => setBookingError(''), 3000); return; }
     setBookingError('');
 
+    const requiredSlots = getSlotsForDuration(timeSlot, duration);
+    const dayOfWeek = getDayOfWeek(selectedDate);
+    
+    // Verificamos si hay al menos alguien trabajando
+    const workingAssistants = assistants.filter(ast => requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek])));
+
+    if (workingAssistants.length === 0) {
+       setBookingError('⚠️ Nadie de turno continuo en este horario.');
+       setTimeout(() => setBookingError(''), 4000);
+       return;
+    }
+
     const bookingData = {
         date: selectedDate,
         time: timeSlot,
@@ -387,7 +399,7 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
     };
 
     try {
-      // Directamente guardamos 1 solo documento. El Vigilante (onSnapshot) se encarga de crear las 2 tarjetas visuales si detecta #doble.
+      // 1 solo documento. El Snapshot se encarga de crear las 2 tarjetas si detecta #doble.
       await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'bookings'), bookingData);
       setPatientName(''); setComments('');
     } catch (err) { console.error("Booking error:", err); }
@@ -398,7 +410,6 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
       const dayOfWeek = getDayOfWeek(booking.date);
 
       const availableAssistants = assistants.filter(ast => {
-         // Crucial: Si es #doble, evita asignar a la asistente que ya está asignada en la otra tarjeta gemela
          if (booking.siblingIdValue === ast.id) return false;
 
          const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek]));
@@ -434,7 +445,7 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
 
   const handleCancel = async (booking) => {
     try {
-        // Al eliminar, se borra el documento raíz completo (liberando ambas tarjetas si es #doble)
+        // Al eliminar el documento raíz, se borran automáticamente las 2 tarjetas (si es #doble)
         await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id));
     } catch (err) { console.error("Cancel error:", err); }
   };
@@ -507,10 +518,8 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
                          
                          {isUnassigned && mb.isFirstSlot !== false && (<button onClick={() => handleAssignToExisting(mb)} className="w-full py-2 mt-2 bg-blue-600 text-white rounded text-xs font-semibold hover:bg-blue-700 transition-colors shadow-sm">Asignar Asistente Disponible</button>)}
                          
-                         {/* Botón para liberar únicamente a esta asistente, sin borrar toda la cita */}
                          {!isUnassigned && mb.isFirstSlot !== false && (<button onClick={() => handleUnassign(mb)} className="w-full py-1.5 mt-1 bg-white/80 text-orange-600 rounded text-xs font-semibold hover:bg-white transition-colors shadow-sm">Liberar Asistente</button>)}
                          
-                         {/* Botón para borrar el paciente por completo de la base de datos */}
                          {mb.isFirstSlot !== false && (<button onClick={() => handleCancel(mb)} className="w-full py-1.5 mt-1 bg-white/80 text-red-600 rounded text-xs font-semibold hover:bg-white transition-colors shadow-sm">Eliminar Cita</button>)}
                          
                          {mb.isFirstSlot === false && (<div className={`text-center text-[10px] mt-1 opacity-60 font-medium ${isUnassigned ? 'text-red-700' : 'text-amber-700'}`}>Bloque en curso</div>)}
@@ -645,7 +654,7 @@ const AssistantView = ({ assistants, bookings }) => {
   );
 };
 
-function App() {
+export default function App() {
   const [user, setUser] = useState(null);
   const [role, setRole] = useState('doctor'); 
   const [assistants, setAssistants] = useState([]);
@@ -666,7 +675,7 @@ function App() {
     return () => unsubscribe();
   }, []);
 
-  // Fetch basic data
+  // Fetch basic data & EL VIGILANTE INTERNO
   useEffect(() => {
     if (!user) return;
     const asstRef = collection(db, 'artifacts', appId, 'public', 'data', 'assistants');
@@ -679,16 +688,47 @@ function App() {
       let expandedBookings = [];
       snapshot.docs.forEach(docSnap => {
         const data = docSnap.data();
-        
+        const idEstado = Number(data.id_estado);
+
+        // 1. VIGILANTE: Limpieza de cancelados/no confirmados/anulados (1, 8, 14)
+        if (idEstado === 1 || idEstado === 8 || idEstado === 14 || data.bloqueo_anulado) {
+           // Borrar silenciosamente para no ensuciar la base de datos
+           deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', docSnap.id)).catch(()=>{});
+           return;
+        }
+
         const fechaCorregida = safeFormatDate(data.date);
         const durationNum = Number(data.duration) || 15;
+        
+        // 2. VIGILANTE: Reprocesar si Dentalink movió la cita de hora o fecha
+        const isAssigned = (data.assistantId && data.assistantId !== 'pendiente') || (data.assistantId2 && data.assistantId2 !== 'pendiente');
+        const changedDate = data.last_synced_date && data.last_synced_date !== fechaCorregida;
+        const changedTime = data.last_synced_time && data.last_synced_time !== data.time;
+        const changedDuration = data.last_synced_duration && data.last_synced_duration !== durationNum;
+
+        if (isAssigned && (changedDate || changedTime || changedDuration)) {
+             // Devolver al estado original para que el motor busque nuevas asistentes
+             updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', docSnap.id), {
+                assistantId: 'pendiente',
+                assistantName: 'Por Asignar',
+                assistantId2: data.assistantId2 ? 'pendiente' : null,
+                assistantName2: data.assistantName2 ? 'Por Asignar' : null,
+                last_synced_date: fechaCorregida,
+                last_synced_time: data.time,
+                last_synced_duration: durationNum
+             }).catch(()=>{});
+             return; // Esperamos al próximo snapshot para dibujarlo limpio
+        }
+        
+        // Generación de tarjetas visuales
         const baseBooking = { id: docSnap.id, ...data, date: fechaCorregida, duration: durationNum };
         const isDoble = typeof data.comments === 'string' && data.comments.toLowerCase().includes('#doble');
         
         if (baseBooking.time) {
           const slotsCovered = getSlotsForDuration(baseBooking.time, durationNum);
           slotsCovered.forEach((slotTime, index) => {
-            // Generar la tarjeta visual para la asistente 1
+            
+            // Tarjeta Asistente 1
             expandedBookings.push({ 
                 ...baseBooking, 
                 time: slotTime, 
@@ -698,10 +738,10 @@ function App() {
                 assistantName: data.assistantName || 'Por Asignar',
                 dbKeyId: 'assistantId',
                 dbKeyName: 'assistantName',
-                siblingIdValue: data.assistantId2 // Para evitar que se asigne la misma
+                siblingIdValue: data.assistantId2 
             });
 
-            // Generar la tarjeta visual GEMELA para la asistente 2 (solo si dice #doble)
+            // Tarjeta Asistente 2 (#doble)
             if (isDoble) {
                 expandedBookings.push({ 
                     ...baseBooking, 
@@ -712,7 +752,7 @@ function App() {
                     assistantName: data.assistantName2 || 'Por Asignar',
                     dbKeyId: 'assistantId2',
                     dbKeyName: 'assistantName2',
-                    siblingIdValue: data.assistantId // Para evitar que se asigne la misma
+                    siblingIdValue: data.assistantId 
                 });
             }
           });
@@ -725,17 +765,15 @@ function App() {
     return () => { unsubAssistants(); unsubDoctors(); unsubBookings(); };
   }, [user]);
 
-  // MOTOR DE AUTO-ASIGNACIÓN BLINDADO PARA DOBLES
+  // MOTOR DE AUTO-ASIGNACIÓN
   useEffect(() => {
     if (assistants.length === 0 || bookings.length === 0) return;
     
-    // Obtenemos tarjetas pendientes en la interfaz visual (puede haber 2 del mismo documento si es #doble)
     const unassignedBookings = bookings.filter(b => b.assistantId === 'pendiente' && b.isFirstSlot !== false);
     
     if (unassignedBookings.length > 0) {
         const booking = unassignedBookings[0];
         
-        // El candado ahora usa el virtualId para poder procesar la tarjeta 1 y tarjeta 2 por separado
         if (processingIds.current.has(booking.virtualId + '_assign')) return;
         processingIds.current.add(booking.virtualId + '_assign');
 
@@ -743,7 +781,7 @@ function App() {
         const dayOfWeek = getDayOfWeek(booking.date);
 
         const availableAssistants = assistants.filter(ast => {
-           // Evita asignar a la misma asistente de la otra tarjeta gemela
+           // Evita asignar la misma asistente de la otra tarjeta gemela
            if (booking.siblingIdValue === ast.id) return false;
 
            const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek]));
@@ -756,10 +794,13 @@ function App() {
         if (availableAssistants.length > 0) {
            const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
            
-           // Actualiza exactamente el campo que le corresponde en el documento único (assistantId o assistantId2)
+           // Se guarda el registro de la asignación y la fecha actual como el "último punto sincronizado"
            updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id), {
                [booking.dbKeyId]: assignedAssistant.id,
-               [booking.dbKeyName]: assignedAssistant.name
+               [booking.dbKeyName]: assignedAssistant.name,
+               last_synced_date: booking.date,
+               last_synced_time: booking.time,
+               last_synced_duration: booking.duration
            }).then(() => {
                processingIds.current.delete(booking.virtualId + '_assign');
            });
