@@ -379,7 +379,6 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
     const requiredSlots = getSlotsForDuration(timeSlot, duration);
     const dayOfWeek = getDayOfWeek(selectedDate);
     
-    // Verificamos si hay al menos alguien trabajando (La asignación real la hace el Cerebro Automático)
     const workingAssistants = assistants.filter(ast => requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek])));
 
     if (workingAssistants.length === 0) {
@@ -387,6 +386,8 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
        setTimeout(() => setBookingError(''), 4000);
        return;
     }
+
+    const isDoble = comments.toLowerCase().includes('#doble');
 
     const bookingData = {
         date: selectedDate,
@@ -397,11 +398,21 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
         patientName: patientName,
         duration: duration,
         comments: comments.trim(),
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        isSecondSlot: false,
+        groupId: Date.now().toString()
     };
 
     try {
-      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'bookings'), bookingData);
+      const collRef = collection(db, 'artifacts', appId, 'public', 'data', 'bookings');
+      await addDoc(collRef, bookingData);
+      
+      // Si la etiqueta #doble está presente, clonamos la cita internamente para asignar a otra asistente
+      if (isDoble) {
+          const bookingData2 = { ...bookingData, isSecondSlot: true };
+          await addDoc(collRef, bookingData2);
+      }
+      
       setPatientName(''); setComments('');
     } catch (err) { console.error("Booking error:", err); }
   };
@@ -411,9 +422,9 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
       const dayOfWeek = getDayOfWeek(booking.date);
 
       const availableAssistants = assistants.filter(ast => {
-         // Evitar asignar a la asistente gemela en caso de #doble
-         if (booking.isSecondSlot && booking.dbAssistantId === ast.id) return false;
-         if (!booking.isSecondSlot && booking.dbAssistantId2 === ast.id) return false;
+         // Asegurarse de no asignar a la misma asistente si es una cita #doble
+         if (booking.isSecondSlot && booking.siblingAssistantId === ast.id) return false;
+         if (!booking.isSecondSlot && booking.siblingAssistantId === ast.id) return false;
 
          const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek]));
          if (!workingAll) return false;
@@ -430,17 +441,32 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
 
       const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
       try {
-        const updateData = booking.isSecondSlot
-                 ? { assistantId2: assignedAssistant.id, assistantName2: assignedAssistant.name }
-                 : { assistantId: assignedAssistant.id, assistantName: assignedAssistant.name };
-
-        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id), updateData);
+        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id), {
+          assistantId: assignedAssistant.id, 
+          assistantName: assignedAssistant.name
+        });
+        
+        // Si hay una cita hermana (por #doble), le informamos quién fue asignada para que no se repita
+        const sibling = bookings.find(b => b.groupId === booking.groupId && b.id !== booking.id);
+        if (sibling) {
+            await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', sibling.id), {
+                siblingAssistantId: assignedAssistant.id
+            });
+        }
       } catch (err) { console.error("Assign error:", err); }
   };
 
   const handleCancel = async (booking) => {
     try {
-        await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id));
+        // Borrar todos los fragmentos si es una cita agrupada (#doble)
+        if (booking.groupId) {
+            const groupBookings = bookings.filter(b => b.groupId === booking.groupId);
+            groupBookings.forEach(async (b) => {
+                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', b.id));
+            });
+        } else {
+            await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id));
+        }
     } catch (err) { console.error("Cancel error:", err); }
   };
 
@@ -628,4 +654,136 @@ const AssistantView = ({ assistants, bookings }) => {
       )}
     </div>
   );
-}
+};
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [role, setRole] = useState('doctor'); 
+  const [assistants, setAssistants] = useState([]);
+  const [doctors, setDoctors] = useState([]);
+  const [bookings, setBookings] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const processingIds = useRef(new Set());
+
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) await signInWithCustomToken(auth, __initial_auth_token);
+        else await signInAnonymously(auth);
+      } catch (error) { console.error("Auth error:", error); }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, (usr) => setUser(usr));
+    return () => unsubscribe();
+  }, []);
+
+  // Fetch basic data
+  useEffect(() => {
+    if (!user) return;
+    const asstRef = collection(db, 'artifacts', appId, 'public', 'data', 'assistants');
+    const unsubAssistants = onSnapshot(asstRef, (snap) => setAssistants(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a,b) => (a.name||'').localeCompare(b.name||''))));
+    const docRef = collection(db, 'artifacts', appId, 'public', 'data', 'doctors');
+    const unsubDoctors = onSnapshot(docRef, (snap) => setDoctors(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a,b) => (a.name||'').localeCompare(b.name||''))));
+
+    const bookRef = collection(db, 'artifacts', appId, 'public', 'data', 'bookings');
+    const unsubBookings = onSnapshot(bookRef, (snapshot) => {
+      let expandedBookings = [];
+      snapshot.docs.forEach(docSnap => {
+        const data = docSnap.data();
+        
+        const fechaCorregida = safeFormatDate(data.date);
+        const durationNum = Number(data.duration) || 15;
+        const baseBooking = { id: docSnap.id, ...data, date: fechaCorregida, duration: durationNum };
+        
+        if (baseBooking.time) {
+          const slotsCovered = getSlotsForDuration(baseBooking.time, durationNum);
+          slotsCovered.forEach((slotTime, index) => {
+            expandedBookings.push({ ...baseBooking, time: slotTime, isFirstSlot: index === 0, virtualId: `${docSnap.id}_${index}` });
+          });
+        } else {
+          expandedBookings.push(baseBooking);
+        }
+      });
+      setBookings(expandedBookings);
+      setLoading(false);
+    });
+
+    return () => { unsubAssistants(); unsubDoctors(); unsubBookings(); };
+  }, [user]);
+
+  // MOTOR DE AUTO-ASIGNACIÓN
+  useEffect(() => {
+    if (assistants.length === 0 || bookings.length === 0) return;
+    
+    const unassignedBookings = bookings.filter(b => b.assistantId === 'pendiente' && b.isFirstSlot !== false);
+    
+    if (unassignedBookings.length > 0) {
+        const booking = unassignedBookings[0];
+        
+        if (processingIds.current.has(booking.id + '_assign')) return;
+        processingIds.current.add(booking.id + '_assign');
+
+        const requiredSlots = getSlotsForDuration(booking.time, booking.duration);
+        const dayOfWeek = getDayOfWeek(booking.date);
+
+        const availableAssistants = assistants.filter(ast => {
+           // Si es una cita gemela, evitamos asignarle la misma asistente
+           if (booking.isSecondSlot && booking.siblingAssistantId === ast.id) return false;
+           if (!booking.isSecondSlot && booking.siblingAssistantId === ast.id) return false;
+
+           const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek]));
+           if (!workingAll) return false;
+           
+           const bookedInAny = requiredSlots.some(slot => bookings.some(b => b.date === booking.date && b.time === slot && b.assistantId === ast.id && b.id !== booking.id));
+           return !bookedInAny;
+        });
+
+        if (availableAssistants.length > 0) {
+           const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
+           
+           updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id), {
+               assistantId: assignedAssistant.id,
+               assistantName: assignedAssistant.name
+           }).then(async () => {
+               // Notificamos a la cita hermana quién fue asignada para que eluda a esa asistente
+               const sibling = bookings.find(b => b.groupId === booking.groupId && b.id !== booking.id);
+               if (sibling) {
+                   await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', sibling.id), {
+                       siblingAssistantId: assignedAssistant.id
+                   });
+               }
+               processingIds.current.delete(booking.id + '_assign');
+           });
+        } else {
+           setTimeout(() => processingIds.current.delete(booking.id + '_assign'), 5000);
+        }
+    }
+  }, [bookings, assistants]);
+
+  if (loading) return <div className="min-h-screen bg-slate-50 flex items-center justify-center text-blue-600 font-medium">Cargando Sistema...</div>;
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-800 font-sans">
+      <header className="bg-white border-b border-slate-200 sticky top-0 z-20">
+        <div className="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-blue-700">
+            <Stethoscope size={24} />
+            <h1 className="text-xl font-bold tracking-tight">Molaria Assist<span className="text-blue-400 font-light">Hub</span></h1>
+          </div>
+          <div className="flex bg-slate-100 p-1 rounded-lg">
+            <button onClick={() => setRole('admin')} className={`px-3 py-1.5 text-sm rounded-md transition-all flex items-center gap-1 ${role === 'admin' ? 'bg-white shadow-sm text-blue-700 font-medium' : 'text-slate-600 hover:text-slate-900'}`}><Shield size={16} /> Admin</button>
+            <button onClick={() => setRole('doctor')} className={`px-3 py-1.5 text-sm rounded-md transition-all flex items-center gap-1 ${role === 'doctor' ? 'bg-white shadow-sm text-blue-700 font-medium' : 'text-slate-600 hover:text-slate-900'}`}><Stethoscope size={16} /> Doctor</button>
+            <button onClick={() => setRole('assistant')} className={`px-3 py-1.5 text-sm rounded-md transition-all flex items-center gap-1 ${role === 'assistant' ? 'bg-white shadow-sm text-blue-700 font-medium' : 'text-slate-600 hover:text-slate-900'}`}><User size={16} /> Asistente</button>
+          </div>
+        </div>
+      </header>
+      <main className="max-w-6xl mx-auto px-4 py-8">
+        {role === 'admin' && <AdminView assistants={assistants} doctors={doctors} />}
+        {role === 'doctor' && <DoctorView assistants={assistants} bookings={bookings} doctors={doctors} />}
+        {role === 'assistant' && <AssistantView assistants={assistants} bookings={bookings} />}
+      </main>
+    </div>
+  );
+};
+
+export default App;
