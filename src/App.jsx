@@ -376,44 +376,19 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
     if (!patientName.trim()) { setBookingError('⚠️ Ingresa el nombre del paciente.'); setTimeout(() => setBookingError(''), 3000); return; }
     setBookingError('');
 
-    const requiredSlots = getSlotsForDuration(timeSlot, duration);
-    const dayOfWeek = getDayOfWeek(selectedDate);
-    
-    // Verificamos si hay al menos alguien trabajando (La asignación real la hace el Cerebro Automático)
-    const workingAssistants = assistants.filter(ast => requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek])));
-
-    if (workingAssistants.length === 0) {
-       setBookingError('⚠️ Nadie de turno continuo en este horario.');
-       setTimeout(() => setBookingError(''), 4000);
-       return;
-    }
-
-    const isDoble = comments.toLowerCase().includes('#doble');
-
     const bookingData = {
         date: selectedDate,
         time: timeSlot,
-        assistantId: 'pendiente',
-        assistantName: 'Por Asignar',
         doctorName: doctorId,
         patientName: patientName,
         duration: duration,
         comments: comments.trim(),
-        createdAt: new Date().toISOString(),
-        isSecondSlot: false,
-        groupId: Date.now().toString()
+        createdAt: new Date().toISOString()
     };
 
     try {
-      const collRef = collection(db, 'artifacts', appId, 'public', 'data', 'bookings');
-      await addDoc(collRef, bookingData);
-      
-      // Si la etiqueta #doble está presente, clonamos la cita internamente para asignar a otra asistente
-      if (isDoble) {
-          const bookingData2 = { ...bookingData, isSecondSlot: true };
-          await addDoc(collRef, bookingData2);
-      }
-      
+      // Directamente guardamos 1 solo documento. El Vigilante (onSnapshot) se encarga de crear las 2 tarjetas visuales si detecta #doble.
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'bookings'), bookingData);
       setPatientName(''); setComments('');
     } catch (err) { console.error("Booking error:", err); }
   };
@@ -423,9 +398,8 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
       const dayOfWeek = getDayOfWeek(booking.date);
 
       const availableAssistants = assistants.filter(ast => {
-         // Asegurarse de no asignar a la misma asistente si es una cita #doble
-         if (booking.isSecondSlot && booking.siblingAssistantId === ast.id) return false;
-         if (!booking.isSecondSlot && booking.siblingAssistantId === ast.id) return false;
+         // Crucial: Si es #doble, evita asignar a la asistente que ya está asignada en la otra tarjeta gemela
+         if (booking.siblingIdValue === ast.id) return false;
 
          const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek]));
          if (!workingAll) return false;
@@ -443,31 +417,25 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
       const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
       try {
         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id), {
-          assistantId: assignedAssistant.id, 
-          assistantName: assignedAssistant.name
+          [booking.dbKeyId]: assignedAssistant.id, 
+          [booking.dbKeyName]: assignedAssistant.name
         });
-        
-        // Si hay una cita hermana (por #doble), le informamos quién fue asignada para que no se repita
-        const sibling = bookings.find(b => b.groupId === booking.groupId && b.id !== booking.id);
-        if (sibling) {
-            await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', sibling.id), {
-                siblingAssistantId: assignedAssistant.id
-            });
-        }
       } catch (err) { console.error("Assign error:", err); }
+  };
+
+  const handleUnassign = async (booking) => {
+      try {
+        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id), {
+          [booking.dbKeyId]: 'pendiente', 
+          [booking.dbKeyName]: 'Por Asignar'
+        });
+      } catch (err) { console.error("Unassign error:", err); }
   };
 
   const handleCancel = async (booking) => {
     try {
-        // Borrar todos los fragmentos si es una cita agrupada (#doble)
-        if (booking.groupId) {
-            const groupBookings = bookings.filter(b => b.groupId === booking.groupId);
-            groupBookings.forEach(async (b) => {
-                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', b.id));
-            });
-        } else {
-            await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id));
-        }
+        // Al eliminar, se borra el documento raíz completo (liberando ambas tarjetas si es #doble)
+        await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id));
     } catch (err) { console.error("Cancel error:", err); }
   };
 
@@ -529,15 +497,22 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
                    const isUnassigned = mb.assistantId === 'pendiente';
                    const cardColor = isUnassigned ? "bg-red-50 border-red-200 text-red-900" : "bg-amber-100 border-amber-200 text-amber-900";
                     return (
-                      <div key={mb.virtualId || mb.id} className={`${cardColor} border p-2 rounded-lg text-sm shadow-sm`}>
+                      <div key={mb.virtualId} className={`${cardColor} border p-2 rounded-lg text-sm shadow-sm`}>
                          <div className="flex justify-between items-center mb-1">
                            <span className="font-semibold flex items-center gap-1">{isUnassigned ? <AlertCircle size={14}/> : <CheckCircle size={14}/>} {mb.assistantName}</span>
                          </div>
                          <div className="text-xs mb-1 font-medium text-slate-800"><Stethoscope size={12} className="inline mr-1 opacity-70"/> Dr(a): {mb.doctorName}</div>
                          <div className="text-xs mb-1 opacity-90">Px: {mb.patientName}</div>
-                         {mb.comments && <div className="text-xs mb-2 opacity-80 italic">Nota: {mb.comments}</div>}
+                         {mb.comments && <div className="text-xs mb-2 opacity-80 italic flex items-start gap-1"><FileText size={12} className="mt-0.5 flex-shrink-0 opacity-70"/> <span>{mb.comments}</span></div>}
+                         
                          {isUnassigned && mb.isFirstSlot !== false && (<button onClick={() => handleAssignToExisting(mb)} className="w-full py-2 mt-2 bg-blue-600 text-white rounded text-xs font-semibold hover:bg-blue-700 transition-colors shadow-sm">Asignar Asistente Disponible</button>)}
-                         {!isUnassigned && mb.isFirstSlot !== false && (<button onClick={() => handleCancel(mb)} className="w-full py-1.5 mt-1 bg-white/80 text-red-600 rounded text-xs font-semibold hover:bg-white transition-colors shadow-sm">Cancelar Cita Completa</button>)}
+                         
+                         {/* Botón para liberar únicamente a esta asistente, sin borrar toda la cita */}
+                         {!isUnassigned && mb.isFirstSlot !== false && (<button onClick={() => handleUnassign(mb)} className="w-full py-1.5 mt-1 bg-white/80 text-orange-600 rounded text-xs font-semibold hover:bg-white transition-colors shadow-sm">Liberar Asistente</button>)}
+                         
+                         {/* Botón para borrar el paciente por completo de la base de datos */}
+                         {mb.isFirstSlot !== false && (<button onClick={() => handleCancel(mb)} className="w-full py-1.5 mt-1 bg-white/80 text-red-600 rounded text-xs font-semibold hover:bg-white transition-colors shadow-sm">Eliminar Cita</button>)}
+                         
                          {mb.isFirstSlot === false && (<div className={`text-center text-[10px] mt-1 opacity-60 font-medium ${isUnassigned ? 'text-red-700' : 'text-amber-700'}`}>Bloque en curso</div>)}
                       </div>
                     );
@@ -598,16 +573,24 @@ const AssistantView = ({ assistants, bookings }) => {
               if (!isTimeInAnyBlock(slot, selectedAssistant.schedule?.[dayOfWeek])) return null;
               const slotBooking = bookings.find(b => b.date === selectedDate && b.time === slot && b.assistantId === selectedAssistantId);
               return (
-                <div key={slot} className={`p-4 flex flex-col md:flex-row md:items-center gap-4 transition-colors ${slotBooking ? 'bg-blue-50/50' : 'hover:bg-slate-50'}`}>
-                  <div className="w-24 font-bold text-slate-700 text-lg flex items-center gap-2"><Clock size={16} className="text-slate-400" /> {slot}</div>
+                <div key={slot} className={`p-4 flex flex-col md:flex-row md:items-start gap-4 transition-colors ${slotBooking ? 'bg-blue-50/50' : 'hover:bg-slate-50'}`}>
+                  <div className="w-24 font-bold text-slate-700 text-lg flex items-center gap-2 mt-1"><Clock size={16} className="text-slate-400" /> {slot}</div>
                   <div className="flex-1">
                     {slotBooking ? (
-                      <div className="flex flex-col md:flex-row md:items-center gap-2 md:gap-6 text-blue-800 font-medium bg-blue-50 p-2 rounded-lg border border-blue-100">
-                        <span className="flex items-center gap-1"><Stethoscope size={16} className="text-blue-600"/> Dr(a): {slotBooking.doctorName}</span>
-                        <span className="flex items-center gap-1"><User size={16} className="text-blue-600"/> Px: {slotBooking.patientName}</span>
+                      <div className="flex flex-col text-blue-800 font-medium bg-blue-50 p-3 rounded-lg border border-blue-100">
+                        <div className="flex flex-col md:flex-row md:items-center gap-2 md:gap-6 mb-1">
+                            <span className="flex items-center gap-1"><Stethoscope size={16} className="text-blue-600"/> Dr(a): {slotBooking.doctorName}</span>
+                            <span className="flex items-center gap-1"><User size={16} className="text-blue-600"/> Px: {slotBooking.patientName}</span>
+                        </div>
+                        {slotBooking.comments && (
+                            <div className="text-sm mt-1 opacity-80 italic flex items-start gap-1">
+                                <FileText size={14} className="mt-0.5 flex-shrink-0 text-blue-600" />
+                                <span>{slotBooking.comments}</span>
+                            </div>
+                        )}
                       </div>
                     ) : (
-                      <div className="text-green-600 font-medium text-sm flex items-center gap-2 px-2"><CheckCircle size={16} /> Turno Libre</div>
+                      <div className="text-green-600 font-medium text-sm flex items-center gap-2 px-2 mt-1"><CheckCircle size={16} /> Turno Libre</div>
                     )}
                   </div>
                 </div>
@@ -636,11 +619,16 @@ const AssistantView = ({ assistants, bookings }) => {
                        const isWorking = isTimeInAnyBlock(slot, ast.schedule[dayOfWeek]);
                        const booking = bookings.find(b => b.date === selectedDate && b.time === slot && b.assistantId === ast.id);
                        return (
-                         <td key={ast.id} className="p-2 border-b border-l border-slate-100 text-center">
-                           {!isWorking ? <div className="text-slate-300 flex justify-center"><XCircle size={16}/></div> : booking ? (
-                             <div className="bg-blue-100 border border-blue-200 text-blue-900 rounded p-1.5 text-xs text-left shadow-sm">
+                         <td key={ast.id} className="p-2 border-b border-l border-slate-100 text-center align-top">
+                           {!isWorking ? <div className="text-slate-300 flex justify-center mt-1"><XCircle size={16}/></div> : booking ? (
+                             <div className="bg-blue-100 border border-blue-200 text-blue-900 rounded p-2 text-xs text-left shadow-sm">
                                <div className="font-bold flex items-center gap-1 mb-1 truncate"><Stethoscope size={12}/> {booking.doctorName}</div>
                                <div className="opacity-90 flex items-center gap-1 truncate"><User size={12}/> {booking.patientName}</div>
+                               {booking.comments && (
+                                 <div className="opacity-80 italic mt-1.5 text-[10px] leading-tight overflow-hidden text-ellipsis" style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }} title={booking.comments}>
+                                   - {booking.comments}
+                                 </div>
+                               )}
                              </div>
                            ) : <div className="text-green-500 font-medium text-xs bg-green-50 border border-green-100 rounded p-2 flex items-center justify-center gap-1"><CheckCircle size={14}/> Libre</div>}
                          </td>
@@ -695,14 +683,39 @@ function App() {
         const fechaCorregida = safeFormatDate(data.date);
         const durationNum = Number(data.duration) || 15;
         const baseBooking = { id: docSnap.id, ...data, date: fechaCorregida, duration: durationNum };
+        const isDoble = typeof data.comments === 'string' && data.comments.toLowerCase().includes('#doble');
         
         if (baseBooking.time) {
           const slotsCovered = getSlotsForDuration(baseBooking.time, durationNum);
           slotsCovered.forEach((slotTime, index) => {
-            expandedBookings.push({ ...baseBooking, time: slotTime, isFirstSlot: index === 0, virtualId: `${docSnap.id}_${index}` });
+            // Generar la tarjeta visual para la asistente 1
+            expandedBookings.push({ 
+                ...baseBooking, 
+                time: slotTime, 
+                isFirstSlot: index === 0, 
+                virtualId: `${docSnap.id}_1_${index}`,
+                assistantId: data.assistantId || 'pendiente',
+                assistantName: data.assistantName || 'Por Asignar',
+                dbKeyId: 'assistantId',
+                dbKeyName: 'assistantName',
+                siblingIdValue: data.assistantId2 // Para evitar que se asigne la misma
+            });
+
+            // Generar la tarjeta visual GEMELA para la asistente 2 (solo si dice #doble)
+            if (isDoble) {
+                expandedBookings.push({ 
+                    ...baseBooking, 
+                    time: slotTime, 
+                    isFirstSlot: index === 0, 
+                    virtualId: `${docSnap.id}_2_${index}`,
+                    assistantId: data.assistantId2 || 'pendiente',
+                    assistantName: data.assistantName2 || 'Por Asignar',
+                    dbKeyId: 'assistantId2',
+                    dbKeyName: 'assistantName2',
+                    siblingIdValue: data.assistantId // Para evitar que se asigne la misma
+                });
+            }
           });
-        } else {
-          expandedBookings.push(baseBooking);
         }
       });
       setBookings(expandedBookings);
@@ -712,25 +725,26 @@ function App() {
     return () => { unsubAssistants(); unsubDoctors(); unsubBookings(); };
   }, [user]);
 
-  // MOTOR DE AUTO-ASIGNACIÓN
+  // MOTOR DE AUTO-ASIGNACIÓN BLINDADO PARA DOBLES
   useEffect(() => {
     if (assistants.length === 0 || bookings.length === 0) return;
     
+    // Obtenemos tarjetas pendientes en la interfaz visual (puede haber 2 del mismo documento si es #doble)
     const unassignedBookings = bookings.filter(b => b.assistantId === 'pendiente' && b.isFirstSlot !== false);
     
     if (unassignedBookings.length > 0) {
         const booking = unassignedBookings[0];
         
-        if (processingIds.current.has(booking.id + '_assign')) return;
-        processingIds.current.add(booking.id + '_assign');
+        // El candado ahora usa el virtualId para poder procesar la tarjeta 1 y tarjeta 2 por separado
+        if (processingIds.current.has(booking.virtualId + '_assign')) return;
+        processingIds.current.add(booking.virtualId + '_assign');
 
         const requiredSlots = getSlotsForDuration(booking.time, booking.duration);
         const dayOfWeek = getDayOfWeek(booking.date);
 
         const availableAssistants = assistants.filter(ast => {
-           // Si es una cita gemela, evitamos asignarle la misma asistente
-           if (booking.isSecondSlot && booking.siblingAssistantId === ast.id) return false;
-           if (!booking.isSecondSlot && booking.siblingAssistantId === ast.id) return false;
+           // Evita asignar a la misma asistente de la otra tarjeta gemela
+           if (booking.siblingIdValue === ast.id) return false;
 
            const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek]));
            if (!workingAll) return false;
@@ -742,21 +756,15 @@ function App() {
         if (availableAssistants.length > 0) {
            const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
            
+           // Actualiza exactamente el campo que le corresponde en el documento único (assistantId o assistantId2)
            updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id), {
-               assistantId: assignedAssistant.id,
-               assistantName: assignedAssistant.name
-           }).then(async () => {
-               // Notificamos a la cita hermana quién fue asignada para que eluda a esa asistente
-               const sibling = bookings.find(b => b.groupId === booking.groupId && b.id !== booking.id);
-               if (sibling) {
-                   await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', sibling.id), {
-                       siblingAssistantId: assignedAssistant.id
-                   });
-               }
-               processingIds.current.delete(booking.id + '_assign');
+               [booking.dbKeyId]: assignedAssistant.id,
+               [booking.dbKeyName]: assignedAssistant.name
+           }).then(() => {
+               processingIds.current.delete(booking.virtualId + '_assign');
            });
         } else {
-           setTimeout(() => processingIds.current.delete(booking.id + '_assign'), 5000);
+           setTimeout(() => processingIds.current.delete(booking.virtualId + '_assign'), 5000);
         }
     }
   }, [bookings, assistants]);
