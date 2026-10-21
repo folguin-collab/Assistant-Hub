@@ -19,7 +19,7 @@ const db = getFirestore(app);
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'dental-assist-app-id';
 
 // --- CONFIGURACIÓN DE INTEGRACIÓN ---
-const N8N_SYNC_AGENDA_WEBHOOK_URL = "https://automatizaciones-n8n.ani4cn.easypanel.host/webhook/sincronizar-agenda-global"; 
+const N8N_SYNC_AGENDA_WEBHOOK_URL = ""; 
 
 // --- UTILITY FUNCTIONS ---
 const generateTimeSlots = (startHour = 8, endHour = 20) => {
@@ -48,7 +48,16 @@ const isTimeInAnyBlock = (time, blocks) => {
 };
 
 const getDayOfWeek = (dateString) => {
-  return new Date(dateString + 'T12:00:00').getDay();
+  if (!dateString) return new Date().getDay();
+  const cleanDate = dateString.split('T')[0];
+  const parts = cleanDate.split('-');
+  if (parts.length === 3) {
+    const y = parseInt(parts[0], 10);
+    const m = parseInt(parts[1], 10) - 1;
+    const d = parseInt(parts[2], 10);
+    return new Date(y, m, d).getDay();
+  }
+  return new Date(dateString).getDay();
 };
 
 const getSlotsForDuration = (startTime, durationMinutes) => {
@@ -72,7 +81,7 @@ const safeFormatDate = (dateVal) => {
     if (typeof dateVal === 'object' && dateVal.toDate) {
         return dateVal.toDate().toISOString().split('T')[0];
     }
-    if (typeof dateVal === 'string' && dateVal.includes('T')) {
+    if (typeof dateVal === 'string') {
         return dateVal.split('T')[0];
     }
     return dateVal;
@@ -530,7 +539,7 @@ const AdminView = ({ assistants, doctors, rotations }) => {
   );
 };
 
-const DoctorView = ({ assistants, bookings, doctors }) => {
+const DoctorView = ({ assistants, bookings, doctors, onManualAssign }) => {
   const [selectedDate, setSelectedDate] = useState(getTodayString());
   const [doctorId, setDoctorId] = useState(''); 
   const [patientName, setPatientName] = useState('');
@@ -581,7 +590,7 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
          const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek]));
          if (!workingAll) return false;
          
-         const bookedInAny = requiredSlots.some(slot => bookings.some(b => b.date === booking.date && b.time === slot && b.assistantId === ast.id && b.id !== booking.id));
+         const bookedInAny = requiredSlots.some(slot => bookings.some(b => b.date === booking.date && b.time === slot && (b.assistantId === ast.id || b.assistantId2 === ast.id) && b.id !== booking.id));
          return !bookedInAny;
       });
 
@@ -739,7 +748,6 @@ const AssistantView = ({ assistants, bookings, doctors, globalAgenda, rotations,
       const now = new Date();
       const currentHour = now.getHours();
 
-      // Solo entre las 9:00 AM (9) y las 8:00 PM (20)
       if (currentHour >= 9 && currentHour <= 20) {
         const hourSlot = `${currentHour.toString().padStart(2, '0')}:00`;
         const dateStr = getTodayString();
@@ -863,7 +871,7 @@ const AssistantView = ({ assistants, bookings, doctors, globalAgenda, rotations,
           <div className="divide-y divide-slate-100">
             {slots.map(slot => {
               if (!isTimeInAnyBlock(slot, selectedAssistant.schedule?.[dayOfWeek])) return null;
-              const slotBooking = bookings.find(b => b.date === selectedDate && b.time === slot && b.assistantId === selectedAssistantId);
+              const slotBooking = bookings.find(b => b.date === selectedDate && b.time === slot && (b.assistantId === selectedAssistantId || b.assistantId2 === selectedAssistantId));
               return (
                 <div key={slot} className={`p-4 flex flex-col md:flex-row md:items-start gap-4 transition-colors ${slotBooking ? 'bg-blue-50/50' : 'hover:bg-slate-50'}`}>
                   <div className="w-24 font-bold text-slate-700 text-lg flex items-center gap-2 mt-1"><Clock size={16} className="text-slate-400" /> {slot}</div>
@@ -909,7 +917,7 @@ const AssistantView = ({ assistants, bookings, doctors, globalAgenda, rotations,
                      <td className="p-3 border-b border-slate-100 text-slate-700 font-medium sticky left-0 bg-white z-10">{slot}</td>
                      {activeAssistants.map(ast => {
                        const isWorking = isTimeInAnyBlock(slot, ast.schedule[dayOfWeek]);
-                       const booking = bookings.find(b => b.date === selectedDate && b.time === slot && b.assistantId === ast.id);
+                       const booking = bookings.find(b => b.date === selectedDate && b.time === slot && (b.assistantId === ast.id || b.assistantId2 === ast.id));
                        return (
                          <td key={ast.id} className="p-2 border-b border-l border-slate-100 text-center align-top">
                            {!isWorking ? <div className="text-slate-300 flex justify-center mt-1"><XCircle size={16}/></div> : booking ? (
@@ -1021,7 +1029,7 @@ const App = () => {
   const [role, setRole] = useState('doctor'); 
   const [assistants, setAssistants] = useState([]);
   const [doctors, setDoctors] = useState([]);
-  const [bookings, setBookings] = useState([]);
+  const [rawBookings, setRawBookings] = useState([]);
   const [globalAgenda, setGlobalAgenda] = useState([]);
   const [rotations, setRotations] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1054,7 +1062,7 @@ const App = () => {
     // COBERTURA 1: Citas que requieren asistente (Robot Activo)
     const bookRef = collection(db, 'artifacts', appId, 'public', 'data', 'bookings');
     const unsubBookings = onSnapshot(bookRef, (snapshot) => {
-      let expandedBookings = [];
+      let docsList = [];
       snapshot.docs.forEach(docSnap => {
         const data = docSnap.data();
         const idEstado = Number(data.id_estado);
@@ -1084,30 +1092,10 @@ const App = () => {
              }).catch(()=>{});
              return; 
         }
-        
-        const baseBooking = { id: docSnap.id, ...data, date: fechaCorregida, duration: durationNum };
-        const isDoble = typeof data.comments === 'string' && data.comments.toLowerCase().includes('#doble');
-        
-        if (baseBooking.time) {
-          const slotsCovered = getSlotsForDuration(baseBooking.time, durationNum);
-          slotsCovered.forEach((slotTime, index) => {
-            expandedBookings.push({ 
-                ...baseBooking, time: slotTime, isFirstSlot: index === 0, virtualId: `${docSnap.id}_1_${index}`,
-                assistantId: data.assistantId || 'pendiente', assistantName: data.assistantName || 'Por Asignar',
-                dbKeyId: 'assistantId', dbKeyName: 'assistantName', siblingIdValue: data.assistantId2 
-            });
 
-            if (isDoble) {
-                expandedBookings.push({ 
-                    ...baseBooking, time: slotTime, isFirstSlot: index === 0, virtualId: `${docSnap.id}_2_${index}`,
-                    assistantId: data.assistantId2 || 'pendiente', assistantName: data.assistantName2 || 'Por Asignar',
-                    dbKeyId: 'assistantId2', dbKeyName: 'assistantName2', siblingIdValue: data.assistantId 
-                });
-            }
-          });
-        }
+        docsList.push({ id: docSnap.id, ...data, date: fechaCorregida, duration: durationNum });
       });
-      setBookings(expandedBookings);
+      setRawBookings(docsList);
     });
 
     // COBERTURA 2: Agenda Global Completa (Visual Espejo)
@@ -1134,57 +1122,103 @@ const App = () => {
     return () => { unsubAssistants(); unsubDoctors(); unsubBookings(); unsubGlobalAgenda(); unsubRotations(); };
   }, [user]);
 
-  // MOTOR DE AUTO-ASIGNACIÓN
-  useEffect(() => {
-    if (assistants.length === 0 || bookings.length === 0) return;
-    
-    const unassignedBookings = bookings.filter(b => b.assistantId === 'pendiente' && b.isFirstSlot !== false);
-    
-    if (unassignedBookings.length > 0) {
-        const booking = unassignedBookings[0];
-        
-        if (processingIds.current.has(booking.virtualId + '_assign')) return;
-        processingIds.current.add(booking.virtualId + '_assign');
+  // EXPANDIR CITAS A SLOTS DE 15 MINUTOS
+  const expandedBookings = useMemo(() => {
+    let result = [];
+    rawBookings.forEach(data => {
+      const durationNum = Number(data.duration) || 15;
+      const isDoble = typeof data.comments === 'string' && data.comments.toLowerCase().includes('#doble');
+      if (data.time) {
+        const slotsCovered = getSlotsForDuration(data.time, durationNum);
+        slotsCovered.forEach((slotTime, index) => {
+          result.push({ 
+              ...data, time: slotTime, isFirstSlot: index === 0, virtualId: `${data.id}_1_${index}`,
+              assistantId: data.assistantId || 'pendiente', assistantName: data.assistantName || 'Por Asignar',
+              dbKeyId: 'assistantId', dbKeyName: 'assistantName', siblingIdValue: data.assistantId2 
+          });
 
-        const requiredSlots = getSlotsForDuration(booking.time, booking.duration);
-        const dayOfWeek = getDayOfWeek(booking.date);
-
-        const availableAssistants = assistants.filter(ast => {
-           if (booking.siblingIdValue === ast.id) return false;
-
-           const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek]));
-           if (!workingAll) return false;
-           
-           const bookedInAny = requiredSlots.some(slot => bookings.some(b => b.date === booking.date && b.time === slot && b.assistantId === ast.id && b.id !== booking.id));
-           return !bookedInAny;
+          if (isDoble) {
+              result.push({ 
+                  ...data, time: slotTime, isFirstSlot: index === 0, virtualId: `${data.id}_2_${index}`,
+                  assistantId: data.assistantId2 || 'pendiente', assistantName: data.assistantName2 || 'Por Asignar',
+                  dbKeyId: 'assistantId2', dbKeyName: 'assistantName2', siblingIdValue: data.assistantId 
+              });
+          }
         });
+      }
+    });
+    return result;
+  }, [rawBookings]);
 
-        if (availableAssistants.length > 0) {
-           const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
-           
-           updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id), {
-               [booking.dbKeyId]: assignedAssistant.id,
-               [booking.dbKeyName]: assignedAssistant.name,
-               last_synced_date: booking.date,
-               last_synced_time: booking.time,
-               last_synced_duration: booking.duration
-           }).then(() => {
-               processingIds.current.delete(booking.virtualId + '_assign');
-           });
-        } else {
-           setTimeout(() => processingIds.current.delete(booking.virtualId + '_assign'), 5000);
-        }
-    }
-  }, [bookings, assistants]);
+  // MOTOR DE AUTO-ASIGNACIÓN (Robustecido)
+  useEffect(() => {
+    if (assistants.length === 0 || rawBookings.length === 0) return;
 
-  const handleSaveRotation = async (rotationData) => {
-    try {
-      const collRef = collection(db, 'artifacts', appId, 'public', 'data', 'rotations');
-      await addDoc(collRef, rotationData);
-    } catch (err) {
-      console.error("Error saving rotation:", err);
+    // Buscar una cita que tenga assistantId === 'pendiente' O assistantId2 === 'pendiente' (si es #doble)
+    const pendingDoc = rawBookings.find(docData => {
+      const isDoble = typeof docData.comments === 'string' && docData.comments.toLowerCase().includes('#doble');
+      const needsFirst = !docData.assistantId || docData.assistantId === 'pendiente';
+      const needsSecond = isDoble && (!docData.assistantId2 || docData.assistantId2 === 'pendiente');
+      return needsFirst || needsSecond;
+    });
+
+    if (!pendingDoc) return;
+
+    const isDoble = typeof pendingDoc.comments === 'string' && pendingDoc.comments.toLowerCase().includes('#doble');
+    const needsFirst = !pendingDoc.assistantId || pendingDoc.assistantId === 'pendiente';
+    const dbKeyId = needsFirst ? 'assistantId' : 'assistantId2';
+    const dbKeyName = needsFirst ? 'assistantName' : 'assistantName2';
+    const siblingIdValue = needsFirst ? pendingDoc.assistantId2 : pendingDoc.assistantId;
+
+    const processKey = `${pendingDoc.id}_${dbKeyId}`;
+    if (processingIds.current.has(processKey)) return;
+    processingIds.current.add(processKey);
+
+    const requiredSlots = getSlotsForDuration(pendingDoc.time, pendingDoc.duration);
+    const dayOfWeek = getDayOfWeek(pendingDoc.date);
+
+    // Buscar asistentes que trabajen durante TODO el bloque de la cita
+    const availableAssistants = assistants.filter(ast => {
+       if (siblingIdValue === ast.id) return false;
+
+       // 1. Debe estar en turno durante TODOS los slots requeridos
+       const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek]));
+       if (!workingAll) return false;
+       
+       // 2. NO debe tener ninguna cita asignada en NINGUNO de los slots requeridos
+       const bookedInAny = requiredSlots.some(slot => 
+         rawBookings.some(otherDoc => {
+           if (otherDoc.id === pendingDoc.id) return false; // ignorar la misma cita
+           const otherSlots = getSlotsForDuration(otherDoc.time, otherDoc.duration);
+           const overlaps = otherSlots.includes(slot) && otherDoc.date === pendingDoc.date;
+           if (!overlaps) return false;
+           return otherDoc.assistantId === ast.id || otherDoc.assistantId2 === ast.id;
+         })
+       );
+
+       return !bookedInAny;
+    });
+
+    if (availableAssistants.length > 0) {
+       const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
+       
+       updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', pendingDoc.id), {
+           [dbKeyId]: assignedAssistant.id,
+           [dbKeyName]: assignedAssistant.name,
+           last_synced_date: pendingDoc.date,
+           last_synced_time: pendingDoc.time,
+           last_synced_duration: pendingDoc.duration
+       }).then(() => {
+           processingIds.current.delete(processKey);
+       }).catch((err) => {
+           console.error("Auto-assign error:", err);
+           processingIds.current.delete(processKey);
+       });
+    } else {
+       // Liberar el bloqueo tras un par de segundos para reintentar si cambian los turnos/citas
+       setTimeout(() => processingIds.current.delete(processKey), 3000);
     }
-  };
+  }, [rawBookings, assistants]);
 
   if (loading) return <div className="min-h-screen bg-slate-50 flex items-center justify-center text-blue-600 font-medium">Cargando Sistema...</div>;
 
@@ -1205,11 +1239,11 @@ const App = () => {
       </header>
       <main className="max-w-6xl mx-auto px-4 py-8">
         {role === 'admin' && <AdminView assistants={assistants} doctors={doctors} rotations={rotations} />}
-        {role === 'doctor' && <DoctorView assistants={assistants} bookings={bookings} doctors={doctors} />}
+        {role === 'doctor' && <DoctorView assistants={assistants} bookings={expandedBookings} doctors={doctors} />}
         {role === 'assistant' && (
           <AssistantView
             assistants={assistants}
-            bookings={bookings}
+            bookings={expandedBookings}
             doctors={doctors}
             globalAgenda={globalAgenda}
             rotations={rotations}
