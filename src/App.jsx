@@ -379,6 +379,7 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
     const requiredSlots = getSlotsForDuration(timeSlot, duration);
     const dayOfWeek = getDayOfWeek(selectedDate);
     
+    // Verificamos si hay al menos alguien trabajando (La asignación real la hace el Cerebro Automático)
     const workingAssistants = assistants.filter(ast => requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek])));
 
     if (workingAssistants.length === 0) {
@@ -656,7 +657,7 @@ const AssistantView = ({ assistants, bookings }) => {
   );
 };
 
-export default function App() {
+function App() {
   const [user, setUser] = useState(null);
   const [role, setRole] = useState('doctor'); 
   const [assistants, setAssistants] = useState([]);
@@ -784,6 +785,6 @@ export default function App() {
       </main>
     </div>
   );
-};
+}
 
 export default App;
