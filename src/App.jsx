@@ -377,29 +377,22 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
     setBookingError('');
 
     const requiredSlots = getSlotsForDuration(timeSlot, duration);
-    if (requiredSlots.length < duration / 15) { setBookingError('⚠️ La duración excede el horario disponible.'); setTimeout(() => setBookingError(''), 3000); return; }
-
     const dayOfWeek = getDayOfWeek(selectedDate);
-    const availableAssistants = assistants.filter(ast => {
-       const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek]));
-       if (!workingAll) return false;
-       const bookedInAny = requiredSlots.some(slot => bookings.some(b => b.date === selectedDate && b.time === slot && b.assistantId === ast.id));
-       return !bookedInAny;
-    });
+    
+    // Verificamos si hay al menos alguien trabajando (La asignación real la hace el Cerebro Automático)
+    const workingAssistants = assistants.filter(ast => requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek])));
 
-    if (availableAssistants.length === 0) {
-       setBookingError('⚠️ No hay asistente disponible de forma continua para este horario.');
+    if (workingAssistants.length === 0) {
+       setBookingError('⚠️ Nadie de turno continuo en este horario.');
        setTimeout(() => setBookingError(''), 4000);
        return;
     }
 
-    const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
-
     const bookingData = {
         date: selectedDate,
         time: timeSlot,
-        assistantId: assignedAssistant.id,
-        assistantName: assignedAssistant.name,
+        assistantId: 'pendiente',
+        assistantName: 'Por Asignar',
         doctorName: doctorId,
         patientName: patientName,
         duration: duration,
@@ -408,8 +401,7 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
     };
 
     try {
-      const collRef = collection(db, 'artifacts', appId, 'public', 'data', 'bookings');
-      await addDoc(collRef, bookingData);
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'bookings'), bookingData);
       setPatientName(''); setComments('');
     } catch (err) { console.error("Booking error:", err); }
   };
@@ -419,8 +411,13 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
       const dayOfWeek = getDayOfWeek(booking.date);
 
       const availableAssistants = assistants.filter(ast => {
+         // Evitar asignar a la asistente gemela en caso de #doble
+         if (booking.isSecondSlot && booking.dbAssistantId === ast.id) return false;
+         if (!booking.isSecondSlot && booking.dbAssistantId2 === ast.id) return false;
+
          const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek]));
          if (!workingAll) return false;
+         
          const bookedInAny = requiredSlots.some(slot => bookings.some(b => b.date === booking.date && b.time === slot && b.assistantId === ast.id && b.id !== booking.id));
          return !bookedInAny;
       });
@@ -433,9 +430,11 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
 
       const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
       try {
-        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id), {
-          assistantId: assignedAssistant.id, assistantName: assignedAssistant.name
-        });
+        const updateData = booking.isSecondSlot
+                 ? { assistantId2: assignedAssistant.id, assistantName2: assignedAssistant.name }
+                 : { assistantId: assignedAssistant.id, assistantName: assignedAssistant.name };
+
+        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id), updateData);
       } catch (err) { console.error("Assign error:", err); }
   };
 
@@ -472,8 +471,8 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
           </div>
         </div>
         <div className="w-full">
-          <label className="block text-sm font-medium text-slate-600 mb-1">Comentarios / Procedimiento (Opcional)</label>
-          <input type="text" value={comments} onChange={(e) => setComments(e.target.value)} placeholder="Ej. Restauración en resina, profilaxis..." className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
+          <label className="block text-sm font-medium text-slate-600 mb-1">Comentarios / Procedimiento (Opcional - Escribe #doble para 2 asistentes)</label>
+          <input type="text" value={comments} onChange={(e) => setComments(e.target.value)} placeholder="Ej. Cirugía compleja #doble" className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
         </div>
       </div>
 
@@ -511,7 +510,7 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
                          <div className="text-xs mb-1 opacity-90">Px: {mb.patientName}</div>
                          {mb.comments && <div className="text-xs mb-2 opacity-80 italic">Nota: {mb.comments}</div>}
                          {isUnassigned && mb.isFirstSlot !== false && (<button onClick={() => handleAssignToExisting(mb)} className="w-full py-2 mt-2 bg-blue-600 text-white rounded text-xs font-semibold hover:bg-blue-700 transition-colors shadow-sm">Asignar Asistente Disponible</button>)}
-                         {!isUnassigned && mb.isFirstSlot !== false && (<button onClick={() => handleCancel(mb)} className="w-full py-1.5 mt-1 bg-white/80 text-red-600 rounded text-xs font-semibold hover:bg-white transition-colors shadow-sm">Cancelar Asistencia</button>)}
+                         {!isUnassigned && mb.isFirstSlot !== false && (<button onClick={() => handleCancel(mb)} className="w-full py-1.5 mt-1 bg-white/80 text-red-600 rounded text-xs font-semibold hover:bg-white transition-colors shadow-sm">Cancelar Cita Completa</button>)}
                          {mb.isFirstSlot === false && (<div className={`text-center text-[10px] mt-1 opacity-60 font-medium ${isUnassigned ? 'text-red-700' : 'text-amber-700'}`}>Bloque en curso</div>)}
                       </div>
                     );
@@ -627,123 +626,6 @@ const AssistantView = ({ assistants, bookings }) => {
            </div>
         </div>
       )}
-    </div>
-  );
-};
-
-export default function App() {
-  const [user, setUser] = useState(null);
-  const [role, setRole] = useState('doctor'); 
-  const [assistants, setAssistants] = useState([]);
-  const [doctors, setDoctors] = useState([]);
-  const [bookings, setBookings] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const processingIds = useRef(new Set());
-
-  useEffect(() => {
-    const initAuth = async () => {
-      try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) await signInWithCustomToken(auth, __initial_auth_token);
-        else await signInAnonymously(auth);
-      } catch (error) { console.error("Auth error:", error); }
-    };
-    initAuth();
-    const unsubscribe = onAuthStateChanged(auth, (usr) => setUser(usr));
-    return () => unsubscribe();
-  }, []);
-
-  // Fetch basic data
-  useEffect(() => {
-    if (!user) return;
-    const asstRef = collection(db, 'artifacts', appId, 'public', 'data', 'assistants');
-    const unsubAssistants = onSnapshot(asstRef, (snap) => setAssistants(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a,b) => (a.name||'').localeCompare(b.name||''))));
-    const docRef = collection(db, 'artifacts', appId, 'public', 'data', 'doctors');
-    const unsubDoctors = onSnapshot(docRef, (snap) => setDoctors(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a,b) => (a.name||'').localeCompare(b.name||''))));
-
-    const bookRef = collection(db, 'artifacts', appId, 'public', 'data', 'bookings');
-    const unsubBookings = onSnapshot(bookRef, (snapshot) => {
-      let expandedBookings = [];
-      snapshot.docs.forEach(docSnap => {
-        const data = docSnap.data();
-        
-        const fechaCorregida = safeFormatDate(data.date);
-        const durationNum = Number(data.duration) || 15;
-        const baseBooking = { id: docSnap.id, ...data, date: fechaCorregida, duration: durationNum };
-        
-        if (baseBooking.time) {
-          const slotsCovered = getSlotsForDuration(baseBooking.time, durationNum);
-          slotsCovered.forEach((slotTime, index) => {
-            expandedBookings.push({ ...baseBooking, time: slotTime, isFirstSlot: index === 0, virtualId: `${docSnap.id}_${index}` });
-          });
-        } else {
-          expandedBookings.push(baseBooking);
-        }
-      });
-      setBookings(expandedBookings);
-      setLoading(false);
-    });
-
-    return () => { unsubAssistants(); unsubDoctors(); unsubBookings(); };
-  }, [user]);
-
-  // MOTOR DE AUTO-ASIGNACIÓN
-  useEffect(() => {
-    if (assistants.length === 0 || bookings.length === 0) return;
-    
-    const unassignedBookings = bookings.filter(b => b.assistantId === 'pendiente' && b.isFirstSlot !== false);
-    
-    if (unassignedBookings.length > 0) {
-        const booking = unassignedBookings[0];
-        
-        if (processingIds.current.has(booking.id + '_assign')) return;
-        processingIds.current.add(booking.id + '_assign');
-
-        const requiredSlots = getSlotsForDuration(booking.time, booking.duration);
-        const dayOfWeek = getDayOfWeek(booking.date);
-
-        const availableAssistants = assistants.filter(ast => {
-           const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek]));
-           if (!workingAll) return false;
-           const bookedInAny = requiredSlots.some(slot => bookings.some(b => b.date === booking.date && b.time === slot && b.assistantId === ast.id && b.id !== booking.id));
-           return !bookedInAny;
-        });
-
-        if (availableAssistants.length > 0) {
-           const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
-           updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id), {
-               assistantId: assignedAssistant.id,
-               assistantName: assignedAssistant.name
-           }).then(() => {
-               processingIds.current.delete(booking.id + '_assign');
-           });
-        } else {
-           setTimeout(() => processingIds.current.delete(booking.id + '_assign'), 5000);
-        }
-    }
-  }, [bookings, assistants]);
-
-  if (loading) return <div className="min-h-screen bg-slate-50 flex items-center justify-center text-blue-600 font-medium">Cargando Sistema...</div>;
-
-  return (
-    <div className="min-h-screen bg-slate-50 text-slate-800 font-sans">
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-20">
-        <div className="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2 text-blue-700">
-            <Stethoscope size={24} />
-            <h1 className="text-xl font-bold tracking-tight">Molaria Assist<span className="text-blue-400 font-light">Hub</span></h1>
-          </div>
-          <div className="flex bg-slate-100 p-1 rounded-lg">
-            <button onClick={() => setRole('admin')} className={`px-3 py-1.5 text-sm rounded-md transition-all flex items-center gap-1 ${role === 'admin' ? 'bg-white shadow-sm text-blue-700 font-medium' : 'text-slate-600 hover:text-slate-900'}`}><Shield size={16} /> Admin</button>
-            <button onClick={() => setRole('doctor')} className={`px-3 py-1.5 text-sm rounded-md transition-all flex items-center gap-1 ${role === 'doctor' ? 'bg-white shadow-sm text-blue-700 font-medium' : 'text-slate-600 hover:text-slate-900'}`}><Stethoscope size={16} /> Doctor</button>
-            <button onClick={() => setRole('assistant')} className={`px-3 py-1.5 text-sm rounded-md transition-all flex items-center gap-1 ${role === 'assistant' ? 'bg-white shadow-sm text-blue-700 font-medium' : 'text-slate-600 hover:text-slate-900'}`}><User size={16} /> Asistente</button>
-          </div>
-        </div>
-      </header>
-      <main className="max-w-6xl mx-auto px-4 py-8">
-        {role === 'admin' && <AdminView assistants={assistants} doctors={doctors} />}
-        {role === 'doctor' && <DoctorView assistants={assistants} bookings={bookings} doctors={doctors} />}
-        {role === 'assistant' && <AssistantView assistants={assistants} bookings={bookings} />}
-      </main>
     </div>
   );
 }
