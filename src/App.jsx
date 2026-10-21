@@ -20,7 +20,7 @@ const appId = typeof __app_id !== 'undefined' ? __app_id : 'dental-assist-app-id
 
 // --- CONFIGURACIÓN DE INTEGRACIÓN ---
 // Aquí pondrás la URL del NUEVO webhook de n8n que se encargará de traer la agenda completa de Dentalink
-const N8N_SYNC_AGENDA_WEBHOOK_URL = "https://automatizaciones-n8n.ani4cn.easypanel.host/webhook-test/sincronizar-agenda-global"; 
+const N8N_SYNC_AGENDA_WEBHOOK_URL = ""; 
 
 // --- UTILITY FUNCTIONS ---
 const generateTimeSlots = (startHour = 8, endHour = 20) => {
