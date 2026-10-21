@@ -399,7 +399,6 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
     };
 
     try {
-      // 1 solo documento. El Snapshot se encarga de crear las 2 tarjetas si detecta #doble.
       await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'bookings'), bookingData);
       setPatientName(''); setComments('');
     } catch (err) { console.error("Booking error:", err); }
@@ -445,7 +444,6 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
 
   const handleCancel = async (booking) => {
     try {
-        // Al eliminar el documento raíz, se borran automáticamente las 2 tarjetas (si es #doble)
         await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id));
     } catch (err) { console.error("Cancel error:", err); }
   };
@@ -692,7 +690,6 @@ export default function App() {
 
         // 1. VIGILANTE: Limpieza de cancelados/no confirmados/anulados (1, 8, 14)
         if (idEstado === 1 || idEstado === 8 || idEstado === 14 || data.bloqueo_anulado) {
-           // Borrar silenciosamente para no ensuciar la base de datos
            deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', docSnap.id)).catch(()=>{});
            return;
         }
@@ -707,7 +704,6 @@ export default function App() {
         const changedDuration = data.last_synced_duration && data.last_synced_duration !== durationNum;
 
         if (isAssigned && (changedDate || changedTime || changedDuration)) {
-             // Devolver al estado original para que el motor busque nuevas asistentes
              updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', docSnap.id), {
                 assistantId: 'pendiente',
                 assistantName: 'Por Asignar',
@@ -717,7 +713,7 @@ export default function App() {
                 last_synced_time: data.time,
                 last_synced_duration: durationNum
              }).catch(()=>{});
-             return; // Esperamos al próximo snapshot para dibujarlo limpio
+             return; 
         }
         
         // Generación de tarjetas visuales
@@ -728,7 +724,6 @@ export default function App() {
           const slotsCovered = getSlotsForDuration(baseBooking.time, durationNum);
           slotsCovered.forEach((slotTime, index) => {
             
-            // Tarjeta Asistente 1
             expandedBookings.push({ 
                 ...baseBooking, 
                 time: slotTime, 
@@ -741,7 +736,6 @@ export default function App() {
                 siblingIdValue: data.assistantId2 
             });
 
-            // Tarjeta Asistente 2 (#doble)
             if (isDoble) {
                 expandedBookings.push({ 
                     ...baseBooking, 
@@ -781,7 +775,6 @@ export default function App() {
         const dayOfWeek = getDayOfWeek(booking.date);
 
         const availableAssistants = assistants.filter(ast => {
-           // Evita asignar la misma asistente de la otra tarjeta gemela
            if (booking.siblingIdValue === ast.id) return false;
 
            const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek]));
@@ -794,7 +787,6 @@ export default function App() {
         if (availableAssistants.length > 0) {
            const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
            
-           // Se guarda el registro de la asignación y la fecha actual como el "último punto sincronizado"
            updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id), {
                [booking.dbKeyId]: assignedAssistant.id,
                [booking.dbKeyName]: assignedAssistant.name,
