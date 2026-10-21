@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc, addDoc, updateDoc } from 'firebase/firestore';
-import { Calendar, Clock, User, UserPlus, Trash2, CheckCircle, XCircle, AlertCircle, Shield, Stethoscope, Users, Pencil, FileText, LayoutGrid, RefreshCw } from 'lucide-react';
+import { Calendar, Clock, User, UserPlus, Trash2, CheckCircle, XCircle, AlertCircle, Shield, Stethoscope, Users, Pencil, FileText, LayoutGrid, RefreshCw, Bell, ClipboardList, Send, Filter } from 'lucide-react';
 
 // --- FIREBASE INITIALIZATION ---
 const firebaseConfig = {
@@ -19,8 +19,7 @@ const db = getFirestore(app);
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'dental-assist-app-id';
 
 // --- CONFIGURACIÓN DE INTEGRACIÓN ---
-// Aquí pondrás la URL del NUEVO webhook de n8n que se encargará de traer la agenda completa de Dentalink
-const N8N_SYNC_AGENDA_WEBHOOK_URL = "https://automatizaciones-n8n.ani4cn.easypanel.host/webhook-test/sincronizar-agenda-global"; 
+const N8N_SYNC_AGENDA_WEBHOOK_URL = ""; 
 
 // --- UTILITY FUNCTIONS ---
 const generateTimeSlots = (startHour = 8, endHour = 20) => {
@@ -81,7 +80,108 @@ const safeFormatDate = (dateVal) => {
 
 // --- COMPONENTS ---
 
-const AdminView = ({ assistants, doctors }) => {
+const RotationModal = ({ isOpen, onClose, assistants, selectedAssistantId, selectedDate, timeSlot, onSave }) => {
+  const [assistantId, setAssistantId] = useState(selectedAssistantId || '');
+  const [activity, setActivity] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (selectedAssistantId) setAssistantId(selectedAssistantId);
+  }, [selectedAssistantId]);
+
+  if (!isOpen) return null;
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!assistantId || !activity.trim()) return;
+    setSubmitting(true);
+    const assistant = assistants.find(a => a.id === assistantId);
+    await onSave({
+      assistantId,
+      assistantName: assistant ? assistant.name : 'Desconocida',
+      date: selectedDate,
+      time: timeSlot,
+      activity: activity.trim(),
+      timestamp: new Date().toISOString()
+    });
+    setActivity('');
+    setSubmitting(false);
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full overflow-hidden animate-in fade-in zoom-in duration-200">
+        <div className="bg-amber-500 p-6 text-white flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="bg-white/20 p-2.5 rounded-xl">
+              <Bell className="w-6 h-6 text-white animate-bounce" />
+            </div>
+            <div>
+              <h3 className="text-lg font-bold">¡Hora de Salir a Rotar!</h3>
+              <p className="text-xs text-amber-100">Registro obligatorio de actividades de la hora ({timeSlot})</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="text-white/80 hover:text-white p-1 rounded-lg hover:bg-white/10 transition-colors">
+            <XCircle size={20} />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+          <div>
+            <label className="block text-sm font-semibold text-slate-700 mb-1">
+              Asistente Responsable que sale a rotar:
+            </label>
+            <select
+              value={assistantId}
+              onChange={(e) => setAssistantId(e.target.value)}
+              className="w-full p-2.5 border border-slate-300 rounded-xl focus:ring-2 focus:ring-amber-500 outline-none bg-white text-sm font-medium"
+              required
+            >
+              <option value="" disabled>Seleccionar asistente...</option>
+              {assistants.map(ast => (
+                <option key={ast.id} value={ast.id}>{ast.name}</option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-sm font-semibold text-slate-700 mb-1">
+              ¿Qué actividades o tareas realizaste en la rotación?
+            </label>
+            <textarea
+              value={activity}
+              onChange={(e) => setActivity(e.target.value)}
+              placeholder="Ej: Desinfección de sillón 3, esterilización de instrumental y reordenamiento de bodega..."
+              className="w-full p-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-amber-500 outline-none h-28 text-sm resize-none"
+              required
+            />
+          </div>
+
+          <div className="flex items-center justify-end gap-3 pt-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2.5 rounded-xl border border-slate-300 text-slate-600 font-medium text-sm hover:bg-slate-50 transition-colors"
+            >
+              Cancelar
+            </button>
+            <button
+              type="submit"
+              disabled={submitting || !assistantId || !activity.trim()}
+              className="px-6 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 disabled:bg-amber-300 text-white font-semibold text-sm transition-colors flex items-center gap-2 shadow-md shadow-amber-500/20"
+            >
+              <Send size={16} />
+              {submitting ? 'Guardando...' : 'Registrar Rotación'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+};
+
+const AdminView = ({ assistants, doctors, rotations }) => {
   const [activeTab, setActiveTab] = useState('assistants'); 
   const [name, setName] = useState('');
   const defaultSchedule = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [], 6: [] };
@@ -92,6 +192,7 @@ const AdminView = ({ assistants, doctors }) => {
   const [blockEnd, setBlockEnd] = useState('13:00');
   const [docName, setDocName] = useState('');
   const [editingDocId, setEditingDocId] = useState(null);
+  const [filterRotationDate, setFilterRotationDate] = useState(getTodayString());
 
   const handleAddBlock = () => {
     if (blockStart >= blockEnd) return;
@@ -180,6 +281,18 @@ const AdminView = ({ assistants, doctors }) => {
     }
   };
 
+  const handleDeleteRotation = async (id) => {
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rotations', id));
+    } catch (err) {
+      console.error("Error deleting rotation:", err);
+    }
+  };
+
+  const filteredRotations = useMemo(() => {
+    return rotations.filter(r => r.date === filterRotationDate);
+  }, [rotations, filterRotationDate]);
+
   return (
     <div className="space-y-6">
       <div className="flex gap-2 bg-white p-2 rounded-xl shadow-sm border border-slate-100">
@@ -188,6 +301,9 @@ const AdminView = ({ assistants, doctors }) => {
         </button>
         <button onClick={() => setActiveTab('doctors')} className={`flex-1 py-2 px-4 rounded-lg font-medium transition-colors flex items-center justify-center gap-2 ${activeTab === 'doctors' ? 'bg-blue-600 text-white' : 'bg-transparent text-slate-600 hover:bg-slate-50'}`}>
           <Stethoscope size={18} /> Doctores
+        </button>
+        <button onClick={() => setActiveTab('rotations')} className={`flex-1 py-2 px-4 rounded-lg font-medium transition-colors flex items-center justify-center gap-2 ${activeTab === 'rotations' ? 'bg-amber-500 text-white' : 'bg-transparent text-slate-600 hover:bg-slate-50'}`}>
+          <ClipboardList size={18} /> Bitácora de Rotaciones
         </button>
       </div>
 
@@ -362,6 +478,54 @@ const AdminView = ({ assistants, doctors }) => {
           </div>
         </>
       )}
+
+      {activeTab === 'rotations' && (
+        <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
+          <div className="p-6 border-b border-slate-100 bg-amber-50 flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <h3 className="text-lg font-semibold text-slate-800 flex items-center gap-2">
+              <ClipboardList size={20} className="text-amber-500" />
+              Bitácora de Rotaciones
+            </h3>
+            <div className="flex items-center gap-2">
+              <Filter size={16} className="text-amber-600" />
+              <label className="text-sm font-medium text-slate-700">Filtrar Fecha:</label>
+              <input
+                type="date"
+                value={filterRotationDate}
+                onChange={(e) => setFilterRotationDate(e.target.value)}
+                className="p-1.5 border border-slate-300 rounded-lg outline-none text-sm bg-white font-medium focus:ring-2 focus:ring-amber-500"
+              />
+            </div>
+          </div>
+
+          <div className="p-4 bg-slate-50 border-b border-slate-100 text-xs font-medium text-slate-500 flex justify-between items-center">
+            <span>Mostrando registros para: <strong className="text-slate-800">{filterRotationDate}</strong></span>
+            <span className="bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full">{filteredRotations.length} rotación(es)</span>
+          </div>
+
+          <div className="divide-y divide-slate-100">
+            {filteredRotations.length === 0 ? (
+              <p className="p-8 text-slate-500 text-center text-sm">No hay registros de rotaciones para el {filterRotationDate}.</p>
+            ) : (
+              filteredRotations.map(rot => (
+                <div key={rot.id} className="p-4 flex items-start justify-between hover:bg-slate-50 transition-colors">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-slate-800 text-sm">{rot.assistantName}</span>
+                      <span className="text-xs bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full font-medium">{rot.date} @ {rot.time}</span>
+                    </div>
+                    <p className="text-sm text-slate-600 bg-slate-50 p-2.5 rounded-lg border border-slate-200 mt-1">{rot.activity}</p>
+                    <p className="text-[10px] text-slate-400">Registrado el: {new Date(rot.timestamp).toLocaleString()}</p>
+                  </div>
+                  <button onClick={() => handleDeleteRotation(rot.id)} className="text-red-500 hover:text-red-700 hover:bg-red-50 p-2 rounded-full transition-colors" title="Eliminar">
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -383,7 +547,6 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
     const requiredSlots = getSlotsForDuration(timeSlot, duration);
     const dayOfWeek = getDayOfWeek(selectedDate);
     
-    // Verificamos si hay al menos alguien trabajando
     const workingAssistants = assistants.filter(ast => requiredSlots.every(slot => isTimeInAnyBlock(slot, ast.schedule?.[dayOfWeek])));
 
     if (workingAssistants.length === 0) {
@@ -542,11 +705,15 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
   );
 };
 
-const AssistantView = ({ assistants, bookings, doctors, globalAgenda }) => {
+const AssistantView = ({ assistants, bookings, doctors, globalAgenda, rotations, onSaveRotation }) => {
   const [selectedAssistantId, setSelectedAssistantId] = useState('');
   const [selectedDate, setSelectedDate] = useState(getTodayString());
-  const [viewMode, setViewMode] = useState('personal'); // personal, assistants, doctors
+  const [viewMode, setViewMode] = useState('personal'); 
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [currentSlotForModal, setCurrentSlotForModal] = useState('09:00');
+  const [notifPermission, setNotifPermission] = useState(typeof Notification !== 'undefined' ? Notification.permission : 'default');
+  const lastNotifiedHour = useRef('');
   const slots = useMemo(() => generateTimeSlots(8, 20), []);
 
   useEffect(() => {
@@ -555,11 +722,54 @@ const AssistantView = ({ assistants, bookings, doctors, globalAgenda }) => {
     }
   }, [assistants, selectedAssistantId]);
 
+  const requestNotificationPermission = async () => {
+    if (typeof Notification !== 'undefined') {
+      const perm = await Notification.requestPermission();
+      setNotifPermission(perm);
+    }
+  };
+
   const selectedAssistant = assistants.find(a => a.id === selectedAssistantId);
   const dayOfWeek = getDayOfWeek(selectedDate);
   const activeAssistants = assistants.filter(ast => ast.schedule?.[dayOfWeek] && ast.schedule[dayOfWeek].length > 0);
 
-  // Computed list of doctors for the Global Agenda (combines configured doctors + any doctor that has a booking today in global)
+  // MOTOR DE CHEQUEO HORA A HORA (09:00 - 20:00)
+  useEffect(() => {
+    const checkRotationHour = () => {
+      const now = new Date();
+      const currentHour = now.getHours();
+
+      // Solo entre las 9:00 AM (9) y las 8:00 PM (20)
+      if (currentHour >= 9 && currentHour <= 20) {
+        const hourSlot = `${currentHour.toString().padStart(2, '0')}:00`;
+        const dateStr = getTodayString();
+
+        if (lastNotifiedHour.current === `${dateStr}_${hourSlot}`) return;
+
+        const workingAssistants = assistants.filter(ast => isTimeInAnyBlock(hourSlot, ast.schedule?.[dayOfWeek]));
+        const busyCount = bookings.filter(b => b.date === dateStr && b.time === hourSlot).length;
+        const availableCount = workingAssistants.length - busyCount;
+
+        if (availableCount > 0) {
+          lastNotifiedHour.current = `${dateStr}_${hourSlot}`;
+          setCurrentSlotForModal(hourSlot);
+          setIsModalOpen(true);
+
+          if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+            new Notification('🔔 ¡Hora de salir a rotar!', {
+              body: `Son las ${hourSlot}. Hay ${availableCount} asistente(s) disponible(s). Haz clic aquí para registrar tu rotación.`,
+              icon: '/favicon.ico'
+            });
+          }
+        }
+      }
+    };
+
+    const timer = setInterval(checkRotationHour, 30000);
+    checkRotationHour();
+    return () => clearInterval(timer);
+  }, [assistants, bookings, dayOfWeek]);
+
   const activeDoctorsNames = useMemo(() => {
     const names = new Set(doctors.map(d => d.name));
     globalAgenda.forEach(b => {
@@ -577,13 +787,11 @@ const AssistantView = ({ assistants, bookings, doctors, globalAgenda }) => {
       }
       setIsSyncing(true);
       try {
-          // Dispara el webhook de n8n pasándole la fecha seleccionada
           await fetch(N8N_SYNC_AGENDA_WEBHOOK_URL, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ fecha: selectedDate })
           });
-          // Simulamos un retraso para mostrar el estado de "Cargando" mientras n8n actualiza Firebase
           setTimeout(() => setIsSyncing(false), 3000);
       } catch (err) {
           console.error("Error syncing agenda:", err);
@@ -592,8 +800,34 @@ const AssistantView = ({ assistants, bookings, doctors, globalAgenda }) => {
       }
   };
 
+  const handleManualOpenModal = () => {
+    const now = new Date();
+    const currentHour = now.getHours();
+    const hourSlot = currentHour >= 9 && currentHour <= 20 ? `${currentHour.toString().padStart(2, '0')}:00` : '09:00';
+    setCurrentSlotForModal(hourSlot);
+    setIsModalOpen(true);
+  };
+
   return (
     <div className="space-y-6">
+      {/* BARRA DE ESTADO DE NOTIFICACIONES */}
+      {notifPermission !== 'granted' && typeof Notification !== 'undefined' && (
+        <div className="bg-amber-50 border border-amber-200 p-4 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-sm">
+          <div className="flex items-center gap-3">
+            <Bell className="text-amber-600 flex-shrink-0 animate-bounce" size={20} />
+            <p className="text-sm text-amber-800 font-medium">
+              Activa las notificaciones del navegador para recibir avisos automáticos de rotación cada hora.
+            </p>
+          </div>
+          <button
+            onClick={requestNotificationPermission}
+            className="bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold px-4 py-2 rounded-lg transition-colors shadow-sm whitespace-nowrap"
+          >
+            Activar Alertas
+          </button>
+        </div>
+      )}
+
       <div className="flex flex-col md:flex-row gap-4 items-end bg-white p-6 rounded-xl shadow-sm border border-slate-100">
         <div className="flex-1 w-full">
           <label className="block text-sm font-medium text-slate-600 mb-1">Soy la asistente:</label>
@@ -605,6 +839,15 @@ const AssistantView = ({ assistants, bookings, doctors, globalAgenda }) => {
         <div className="flex-1 w-full">
           <label className="block text-sm font-medium text-slate-600 mb-1">Fecha ({DAYS_OF_WEEK[dayOfWeek]}):</label>
           <input type="date" value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)} className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
+        </div>
+        <div>
+          <button
+            onClick={handleManualOpenModal}
+            className="w-full md:w-auto bg-amber-500 hover:bg-amber-600 text-white font-semibold px-4 py-2 rounded-lg transition-colors flex items-center justify-center gap-2 text-sm shadow-sm"
+          >
+            <ClipboardList size={18} />
+            Registrar Rotación
+          </button>
         </div>
       </div>
 
@@ -714,12 +957,10 @@ const AssistantView = ({ assistants, bookings, doctors, globalAgenda }) => {
                    <tr key={slot} className="hover:bg-slate-50/50 h-8">
                      <td className="p-1 border-b border-slate-100 text-slate-700 font-medium sticky left-0 bg-white z-10 text-xs text-center shadow-[1px_0_0_0_#f1f5f9]">{slot}</td>
                      {activeDoctorsNames.map(docName => {
-                       // En la agenda global buscamos de la colección 'globalAgenda' (todas las citas)
                        const globalAppt = globalAgenda.find(b => b.date === selectedDate && b.time === slot && b.doctorName === docName);
                        
                        if (!globalAppt) return <td key={docName} className="p-0 border-b border-l border-slate-100"></td>;
 
-                       // Verificamos si, además, esta cita requiere asistente revisando la colección 'bookings'
                        const requiresAssistant = bookings.find(b => b.date === selectedDate && b.time === slot && b.doctorName === docName && !b.isSecondSlot);
                        const isUnassigned = requiresAssistant ? (requiresAssistant.assistantId === 'pendiente') : false;
                        
@@ -760,6 +1001,17 @@ const AssistantView = ({ assistants, bookings, doctors, globalAgenda }) => {
            </div>
         </div>
       )}
+
+      {/* MODAL POP-UP DE REGISTRO DE ROTACIÓN */}
+      <RotationModal
+        isOpen={isModalOpen}
+        onClose={() => setIsModalOpen(false)}
+        assistants={assistants}
+        selectedAssistantId={selectedAssistantId}
+        selectedDate={selectedDate}
+        timeSlot={currentSlotForModal}
+        onSave={onSaveRotation}
+      />
     </div>
   );
 };
@@ -771,6 +1023,7 @@ const App = () => {
   const [doctors, setDoctors] = useState([]);
   const [bookings, setBookings] = useState([]);
   const [globalAgenda, setGlobalAgenda] = useState([]);
+  const [rotations, setRotations] = useState([]);
   const [loading, setLoading] = useState(true);
   const processingIds = useRef(new Set());
 
@@ -794,6 +1047,10 @@ const App = () => {
     const docRef = collection(db, 'artifacts', appId, 'public', 'data', 'doctors');
     const unsubDoctors = onSnapshot(docRef, (snap) => setDoctors(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a,b) => (a.name||'').localeCompare(b.name||''))));
 
+    // COBERTURA DE ROTACIONES
+    const rotRef = collection(db, 'artifacts', appId, 'public', 'data', 'rotations');
+    const unsubRotations = onSnapshot(rotRef, (snap) => setRotations(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a,b) => (b.timestamp||'').localeCompare(a.timestamp||''))));
+
     // COBERTURA 1: Citas que requieren asistente (Robot Activo)
     const bookRef = collection(db, 'artifacts', appId, 'public', 'data', 'bookings');
     const unsubBookings = onSnapshot(bookRef, (snapshot) => {
@@ -802,7 +1059,6 @@ const App = () => {
         const data = docSnap.data();
         const idEstado = Number(data.id_estado);
 
-        // VIGILANTE DE LIMPIEZA
         if (idEstado === 1 || idEstado === 8 || idEstado === 14 || data.bloqueo_anulado) {
            deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', docSnap.id)).catch(()=>{});
            return;
@@ -811,7 +1067,6 @@ const App = () => {
         const fechaCorregida = safeFormatDate(data.date);
         const durationNum = Number(data.duration) || 15;
         
-        // VIGILANTE DE REPROGRAMACIÓN
         const isAssigned = (data.assistantId && data.assistantId !== 'pendiente') || (data.assistantId2 && data.assistantId2 !== 'pendiente');
         const changedDate = data.last_synced_date && data.last_synced_date !== fechaCorregida;
         const changedTime = data.last_synced_time && data.last_synced_time !== data.time;
@@ -876,10 +1131,10 @@ const App = () => {
       setLoading(false);
     });
 
-    return () => { unsubAssistants(); unsubDoctors(); unsubBookings(); unsubGlobalAgenda(); };
+    return () => { unsubAssistants(); unsubDoctors(); unsubBookings(); unsubGlobalAgenda(); unsubRotations(); };
   }, [user]);
 
-  // MOTOR DE AUTO-ASIGNACIÓN (Solo para la colección 'bookings')
+  // MOTOR DE AUTO-ASIGNACIÓN
   useEffect(() => {
     if (assistants.length === 0 || bookings.length === 0) return;
     
@@ -922,6 +1177,15 @@ const App = () => {
     }
   }, [bookings, assistants]);
 
+  const handleSaveRotation = async (rotationData) => {
+    try {
+      const collRef = collection(db, 'artifacts', appId, 'public', 'data', 'rotations');
+      await addDoc(collRef, rotationData);
+    } catch (err) {
+      console.error("Error saving rotation:", err);
+    }
+  };
+
   if (loading) return <div className="min-h-screen bg-slate-50 flex items-center justify-center text-blue-600 font-medium">Cargando Sistema...</div>;
 
   return (
@@ -940,9 +1204,18 @@ const App = () => {
         </div>
       </header>
       <main className="max-w-6xl mx-auto px-4 py-8">
-        {role === 'admin' && <AdminView assistants={assistants} doctors={doctors} />}
+        {role === 'admin' && <AdminView assistants={assistants} doctors={doctors} rotations={rotations} />}
         {role === 'doctor' && <DoctorView assistants={assistants} bookings={bookings} doctors={doctors} />}
-        {role === 'assistant' && <AssistantView assistants={assistants} bookings={bookings} doctors={doctors} globalAgenda={globalAgenda} />}
+        {role === 'assistant' && (
+          <AssistantView
+            assistants={assistants}
+            bookings={bookings}
+            doctors={doctors}
+            globalAgenda={globalAgenda}
+            rotations={rotations}
+            onSaveRotation={handleSaveRotation}
+          />
+        )}
       </main>
     </div>
   );
