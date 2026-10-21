@@ -4,13 +4,6 @@ import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged }
 import { getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc, addDoc, updateDoc } from 'firebase/firestore';
 import { Calendar, Clock, User, UserPlus, Trash2, CheckCircle, XCircle, AlertCircle, Shield, Stethoscope, Users, Pencil, FileText } from 'lucide-react';
 
-// --- CONFIGURACIÓN DE INTEGRACIÓN ---
-const N8N_WEBHOOK_BLOQUEOS_URL = "https://automatizaciones-n8n.ani4cn.easypanel.host/webhook/181d9cb9-3a71-4e3d-85ce-9427981cab6b"; // <-- ¡PEGA AQUÍ LA URL DE TU WEBHOOK DE N8N!
-const ID_PACIENTE_BLOQUEO = 8037;
-const ID_DENTISTA_ASISTENTE = 11; 
-const ID_ESTADO_DISPONIBLE = 24; // Gris/Verde (Hay cupo)
-const ID_ESTADO_LLENO = 25;      // Rojo (Asistentes agotadas)
-
 // --- FIREBASE INITIALIZATION ---
 const firebaseConfig = {
   apiKey: "AIzaSyDXrbo8NzD1PxsHlFivP8_bvTBuUdieCMU",
@@ -71,18 +64,6 @@ const getSlotsForDuration = (startTime, durationMinutes) => {
   return slots;
 };
 
-const timeToMins = (t) => {
-    if(!t) return 0;
-    const [h, m] = t.split(':').map(Number); 
-    return h * 60 + m; 
-};
-
-const minsToTime = (m) => { 
-    const h = Math.floor(m / 60); 
-    const mm = m % 60; 
-    return `${h.toString().padStart(2,'0')}:${mm.toString().padStart(2,'0')}`; 
-};
-
 const safeFormatDate = (dateVal) => {
     if (!dateVal) return getTodayString();
     if (typeof dateVal === 'object' && dateVal.toDate) {
@@ -92,106 +73,6 @@ const safeFormatDate = (dateVal) => {
         return dateVal.split('T')[0];
     }
     return dateVal;
-};
-
-// --- HALF-HOURLY BLOCK GENERATOR & SEMÁFORO LOGIC ---
-const computeHalfHourlyBlocks = (bookings, assistants) => {
-    const byDate = {};
-    bookings.forEach(b => {
-       if(b.assistantId === 'pendiente' || b.bloqueo_anulado || b.isFirstSlot === false) return;
-       const date = safeFormatDate(b.date);
-       if(!byDate[date]) byDate[date] = [];
-       const startMins = timeToMins(b.time);
-       byDate[date].push({ ...b, startMins, endMins: startMins + Number(b.duration) });
-    });
-
-    const halfHourlyBlocks = [];
-    Object.keys(byDate).forEach(date => {
-       const dayBookings = byDate[date];
-       const dayOfWeek = getDayOfWeek(date);
-       
-       // Evaluamos cada media hora de la jornada clínica (8 a 20)
-       for (let h = 8; h <= 20; h++) {
-           for (let m = 0; m < 60; m += 30) {
-               if (h === 20 && m > 0) break; 
-               const slotStartMins = h * 60 + m;
-               const slotEndMins = slotStartMins + 30;
-               const slotTime = minsToTime(slotStartMins);
-               
-               // Citas que tocan esta media hora
-               const overlapping = dayBookings.filter(b => b.startMins < slotEndMins && b.endMins > slotStartMins);
-               
-               if (overlapping.length > 0) {
-                   overlapping.sort((a,b) => a.startMins - b.startMins);
-                   const comments = overlapping.map(b => `${b.time}-${minsToTime(b.endMins)} [${b.assistantName}] Dra.${b.doctorName}`).join(' | ');
-                   
-                   // LÓGICA DEL SEMÁFORO
-                   // ¿Cuántas asistentes están trabajando a esta hora?
-                   const workingAssistantsCount = assistants.filter(ast => isTimeInAnyBlock(slotTime, ast.schedule?.[dayOfWeek])).length;
-                   // Si hay igual o más citas que asistentes trabajando, el bloque se pone ROJO (Lleno)
-                   const id_estado = (overlapping.length >= workingAssistantsCount && workingAssistantsCount > 0) ? ID_ESTADO_LLENO : ID_ESTADO_DISPONIBLE;
-                   
-                   halfHourlyBlocks.push({
-                       id: `half_${date}_${slotStartMins}`,
-                       date: date,
-                       time: slotTime,
-                       duration: 30, // Bloque fijo de 30 mins
-                       comments: comments,
-                       id_estado: id_estado
-                   });
-               }
-           }
-       }
-    });
-    return halfHourlyBlocks;
-};
-
-// --- EL NUEVO NOTIFICADOR DE BLOQUES DE 30 MIN ---
-const notifyDentalinkHalfHourlyBlock = async (block, action = 'crear', newEstado) => {
-    if (!N8N_WEBHOOK_BLOQUEOS_URL) return;
-    try {
-        const payload = {
-            accion: action,
-            id_cita_dentalink: block.dentalink_bloqueo_id || null, 
-            id_paciente: ID_PACIENTE_BLOQUEO,
-            id_estado: newEstado, 
-            id_dentista: ID_DENTISTA_ASISTENTE, 
-            fecha: block.date,
-            hora_inicio: block.time,
-            hora_fin: minsToTime(timeToMins(block.time) + block.duration),
-            duracion: block.duration,
-            comentarios: block.comments
-        };
-
-        const response = await fetch(N8N_WEBHOOK_BLOQUEOS_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-
-        if (action === 'crear' && response.ok) {
-            try {
-                const text = await response.text();
-                if (text) {
-                    const data = JSON.parse(text);
-                    let newId = null;
-                    if (Array.isArray(data) && data[0]?.data?.id) newId = data[0].data.id;
-                    else if (data?.data?.id) newId = data.data.id;
-                    else if (data?.id) newId = data.id;
-
-                    if (newId) {
-                        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'half_hourly_blocks_state', block.id);
-                        await setDoc(docRef, { ...block, dentalink_bloqueo_id: newId });
-                        console.log(`✅ Bloque 30min creado. ID: ${newId}`);
-                    }
-                }
-            } catch (parseError) {
-                console.warn("⚠️ Bloque creado, pero no se pudo leer el ID.", parseError);
-            }
-        }
-    } catch (e) {
-        console.error(`Error al ejecutar la acción '${action}' en n8n:`, e);
-    }
 };
 
 // --- COMPONENTS ---
@@ -513,20 +394,16 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
     }
 
     const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
-    const groupId = Date.now().toString() + Math.random().toString(36).substr(2, 5);
 
     const bookingData = {
-        groupId,
         date: selectedDate,
         time: timeSlot,
         assistantId: assignedAssistant.id,
         assistantName: assignedAssistant.name,
-        doctorId: 'manual',
         doctorName: doctorId,
         patientName: patientName,
         duration: duration,
         comments: comments.trim(),
-        isFirstSlot: true,
         createdAt: new Date().toISOString()
     };
 
@@ -564,16 +441,7 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
 
   const handleCancel = async (booking) => {
     try {
-      if (booking.groupId && booking.assistantId !== 'pendiente') {
-         const groupBookings = bookings.filter(b => b.groupId === booking.groupId);
-         groupBookings.forEach(async (b) => {
-             await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', b.id), { bloqueo_anulado: true });
-             setTimeout(() => deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', b.id)), 2000);
-         });
-      } else {
-         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id), { bloqueo_anulado: true });
-         setTimeout(() => deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id)), 2000);
-      }
+        await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id));
     } catch (err) { console.error("Cancel error:", err); }
   };
 
@@ -643,13 +511,13 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
                          <div className="text-xs mb-1 opacity-90">Px: {mb.patientName}</div>
                          {mb.comments && <div className="text-xs mb-2 opacity-80 italic">Nota: {mb.comments}</div>}
                          {isUnassigned && mb.isFirstSlot !== false && (<button onClick={() => handleAssignToExisting(mb)} className="w-full py-2 mt-2 bg-blue-600 text-white rounded text-xs font-semibold hover:bg-blue-700 transition-colors shadow-sm">Asignar Asistente Disponible</button>)}
-                         {!isUnassigned && mb.isFirstSlot !== false && (<button onClick={() => handleCancel(mb)} className="w-full py-1.5 mt-1 bg-white/80 text-red-600 rounded text-xs font-semibold hover:bg-white transition-colors shadow-sm">Liberar Bloque</button>)}
+                         {!isUnassigned && mb.isFirstSlot !== false && (<button onClick={() => handleCancel(mb)} className="w-full py-1.5 mt-1 bg-white/80 text-red-600 rounded text-xs font-semibold hover:bg-white transition-colors shadow-sm">Cancelar Asistencia</button>)}
                          {mb.isFirstSlot === false && (<div className={`text-center text-[10px] mt-1 opacity-60 font-medium ${isUnassigned ? 'text-red-700' : 'text-amber-700'}`}>Bloque en curso</div>)}
                       </div>
                     );
                   })}
                 </div>
-                {availableCount > 0 && <button onClick={() => handleBook(slot)} className="w-full py-2 bg-slate-200 text-slate-700 rounded-lg text-sm font-medium hover:bg-slate-300 transition-colors shadow-sm mt-auto">Agendar Manualmente</button>}
+                {availableCount > 0 && <button onClick={() => handleBook(slot)} className="w-full py-2 bg-slate-200 text-slate-700 rounded-lg text-sm font-medium hover:bg-slate-300 transition-colors shadow-sm mt-auto">Agendar Asistente</button>}
               </div>
             );
           })}
@@ -769,7 +637,6 @@ export default function App() {
   const [assistants, setAssistants] = useState([]);
   const [doctors, setDoctors] = useState([]);
   const [bookings, setBookings] = useState([]);
-  const [halfHourlyBlocksState, setHalfHourlyBlocksState] = useState([]);
   const [loading, setLoading] = useState(true);
   const processingIds = useRef(new Set());
 
@@ -792,15 +659,12 @@ export default function App() {
     const unsubAssistants = onSnapshot(asstRef, (snap) => setAssistants(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a,b) => (a.name||'').localeCompare(b.name||''))));
     const docRef = collection(db, 'artifacts', appId, 'public', 'data', 'doctors');
     const unsubDoctors = onSnapshot(docRef, (snap) => setDoctors(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a,b) => (a.name||'').localeCompare(b.name||''))));
-    const hhStateRef = collection(db, 'artifacts', appId, 'public', 'data', 'half_hourly_blocks_state');
-    const unsubHHState = onSnapshot(hhStateRef, (snap) => setHalfHourlyBlocksState(snap.docs.map(doc => ({ id: doc.id, ...doc.data() }))));
 
     const bookRef = collection(db, 'artifacts', appId, 'public', 'data', 'bookings');
     const unsubBookings = onSnapshot(bookRef, (snapshot) => {
       let expandedBookings = [];
       snapshot.docs.forEach(docSnap => {
         const data = docSnap.data();
-        if (data.bloqueo_anulado) return; 
         
         const fechaCorregida = safeFormatDate(data.date);
         const durationNum = Number(data.duration) || 15;
@@ -819,10 +683,10 @@ export default function App() {
       setLoading(false);
     });
 
-    return () => { unsubAssistants(); unsubDoctors(); unsubBookings(); unsubHHState(); };
+    return () => { unsubAssistants(); unsubDoctors(); unsubBookings(); };
   }, [user]);
 
-  // MOTOR DE AUTO-ASIGNACIÓN CONTINUO
+  // MOTOR DE AUTO-ASIGNACIÓN
   useEffect(() => {
     if (assistants.length === 0 || bookings.length === 0) return;
     
@@ -857,52 +721,6 @@ export default function App() {
         }
     }
   }, [bookings, assistants]);
-
-  // EL CEREBRO DE BLOQUES FIJOS POR MEDIA HORA CON SEMÁFORO
-  useEffect(() => {
-      if (bookings.length === 0 && halfHourlyBlocksState.length === 0) return;
-      
-      const computed = computeHalfHourlyBlocks(bookings, assistants);
-      
-      // 1. Detectar Bloques de 30 mins Nuevos o Modificados
-      computed.forEach(async (comp) => {
-          if(processingIds.current.has(comp.id)) return;
-          const existing = halfHourlyBlocksState.find(m => m.id === comp.id);
-          
-          if(!existing) {
-              // No existe en Dentalink: Crear bloque (POST)
-              processingIds.current.add(comp.id);
-              await notifyDentalinkHalfHourlyBlock(comp, 'crear', comp.id_estado);
-              setTimeout(() => processingIds.current.delete(comp.id), 5000);
-          } else {
-              // Ya existe: Revisar si los textos internos o el COLOR (id_estado) cambiaron
-              const propsChanged = existing.comments !== comp.comments || existing.id_estado !== comp.id_estado;
-              if (propsChanged) {
-                  processingIds.current.add(comp.id);
-                  // Usamos el ID del bloque viejo para editarle el comentario y/o el estado
-                  await notifyDentalinkHalfHourlyBlock({...comp, dentalink_bloqueo_id: existing.dentalink_bloqueo_id}, 'editar', comp.id_estado);
-                  await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'half_hourly_blocks_state', existing.id), {
-                      comments: comp.comments,
-                      id_estado: comp.id_estado
-                  });
-                  setTimeout(() => processingIds.current.delete(comp.id), 3000);
-              }
-          }
-      });
-      
-      // 2. Detectar Bloques Vacíos (Medias horas que se quedaron sin citas)
-      halfHourlyBlocksState.forEach(async (existing) => {
-          const stillExists = computed.find(c => c.id === existing.id);
-          if(!stillExists && !processingIds.current.has(existing.id)) {
-               processingIds.current.add(existing.id);
-               // Anular bloque en Dentalink y borrar de Firebase
-               await notifyDentalinkHalfHourlyBlock(existing, 'anular', 1);
-               await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'half_hourly_blocks_state', existing.id));
-               setTimeout(() => processingIds.current.delete(existing.id), 3000);
-          }
-      });
-      
-  }, [bookings, halfHourlyBlocksState, assistants]);
 
   if (loading) return <div className="min-h-screen bg-slate-50 flex items-center justify-center text-blue-600 font-medium">Cargando Sistema...</div>;
 
