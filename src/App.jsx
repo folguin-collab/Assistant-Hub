@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc, addDoc, updateDoc } from 'firebase/firestore';
-import { Calendar, Clock, User, UserPlus, Trash2, CheckCircle, XCircle, AlertCircle, Shield, Stethoscope, Users, Pencil, FileText, LayoutGrid, RefreshCw, Bell, ClipboardList, Send, Filter } from 'lucide-react';
+import { Calendar, Clock, User, UserPlus, Trash2, CheckCircle, XCircle, AlertCircle, Shield, Stethoscope, Users, Pencil, FileText, LayoutGrid, RefreshCw, Bell, ClipboardList, Send, Filter, Check } from 'lucide-react';
 
 // --- FIREBASE INITIALIZATION ---
 const firebaseConfig = {
@@ -19,7 +19,7 @@ const db = getFirestore(app);
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'dental-assist-app-id';
 
 // --- CONFIGURACIÓN DE INTEGRACIÓN ---
-const N8N_SYNC_AGENDA_WEBHOOK_URL = "https://automatizaciones-n8n.ani4cn.easypanel.host/webhook/sincronizar-agenda-global"; 
+const N8N_SYNC_AGENDA_WEBHOOK_URL = ""; 
 
 // --- UTILITY FUNCTIONS ---
 const generateTimeSlots = (startHour = 8, endHour = 20) => {
@@ -559,33 +559,21 @@ const AdminView = ({ assistants, doctors, rotations }) => {
   );
 };
 
-const DoctorView = ({ assistants, bookings, doctors }) => {
+const DoctorView = ({ assistants, bookings, doctors, rawBookings }) => {
   const [selectedDate, setSelectedDate] = useState(getTodayString());
   const [doctorId, setDoctorId] = useState(''); 
   const [patientName, setPatientName] = useState('');
   const [duration, setDuration] = useState(60); 
   const [comments, setComments] = useState('');
   const [bookingError, setBookingError] = useState('');
+  const [selectedAssistantManual, setSelectedAssistantManual] = useState({});
+  const [cardError, setCardError] = useState({});
   const slots = useMemo(() => generateTimeSlots(8, 20), []);
 
   const handleBook = async (timeSlot) => {
     if (!doctorId) { setBookingError('⚠️ Ingresa el nombre del Doctor(a).'); setTimeout(() => setBookingError(''), 3000); return; }
     if (!patientName.trim()) { setBookingError('⚠️ Ingresa el nombre del paciente.'); setTimeout(() => setBookingError(''), 3000); return; }
     setBookingError('');
-
-    const requiredSlots = getSlotsForDuration(timeSlot, duration);
-    const dayOfWeek = getDayOfWeek(selectedDate);
-    
-    const workingAssistants = assistants.filter(ast => {
-      const scheduleBlocks = getAssistantScheduleForDay(ast, dayOfWeek);
-      return requiredSlots.every(slot => isTimeInAnyBlock(slot, scheduleBlocks));
-    });
-
-    if (workingAssistants.length === 0) {
-       setBookingError('⚠️ Nadie de turno continuo en este horario.');
-       setTimeout(() => setBookingError(''), 4000);
-       return;
-    }
 
     const bookingData = {
         date: selectedDate,
@@ -605,34 +593,66 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
     } catch (err) { console.error("Booking error:", err); }
   };
 
-  const handleAssignToExisting = async (booking) => {
-      const requiredSlots = getSlotsForDuration(booking.time, booking.duration);
-      const dayOfWeek = getDayOfWeek(booking.date);
-
-      const availableAssistants = assistants.filter(ast => {
-         if (booking.siblingIdValue === ast.id) return false;
-
-         const scheduleBlocks = getAssistantScheduleForDay(ast, dayOfWeek);
-         const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, scheduleBlocks));
-         if (!workingAll) return false;
-         
-         const bookedInAny = requiredSlots.some(slot => bookings.some(b => b.date === booking.date && formatCleanTime(b.time) === formatCleanTime(slot) && (b.assistantId === ast.id || b.assistantId2 === ast.id) && b.id !== booking.id));
-         return !bookedInAny;
-      });
-
-      if (availableAssistants.length === 0) {
-         setBookingError(`⚠️ No hay asistentes libres a las ${booking.time}.`);
-         setTimeout(() => setBookingError(''), 4000);
-         return;
-      }
-
-      const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
+  // Asignar asistente específica elegida del menú desplegable o aleatoria
+  const handleAssignSelectedAssistant = async (booking) => {
+    const chosenAstId = selectedAssistantManual[booking.virtualId];
+    
+    // Si eligió una asistente puntual del dropdown
+    if (chosenAstId) {
+      const ast = assistants.find(a => a.id === chosenAstId);
+      if (!ast) return;
       try {
         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id), {
-          [booking.dbKeyId]: assignedAssistant.id, 
-          [booking.dbKeyName]: assignedAssistant.name
+          [booking.dbKeyId]: ast.id, 
+          [booking.dbKeyName]: ast.name,
+          last_synced_date: booking.date,
+          last_synced_time: booking.time,
+          last_synced_duration: booking.duration
         });
-      } catch (err) { console.error("Assign error:", err); }
+        setCardError(prev => ({ ...prev, [booking.virtualId]: '' }));
+      } catch (err) {
+        console.error("Assign error:", err);
+      }
+      return;
+    }
+
+    // Si no seleccionó ninguna y le dio a auto-asignar con el botón
+    const requiredSlots = getSlotsForDuration(booking.time, booking.duration);
+    const dayOfWeek = getDayOfWeek(booking.date);
+
+    const availableAssistants = assistants.filter(ast => {
+       if (booking.siblingIdValue === ast.id) return false;
+
+       const scheduleBlocks = getAssistantScheduleForDay(ast, dayOfWeek);
+       const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, scheduleBlocks));
+       if (!workingAll) return false;
+       
+       const bookedInAny = requiredSlots.some(slot => rawBookings.some(b => {
+         if (b.id === booking.id) return false;
+         if (b.date !== booking.date) return false;
+         const otherSlots = getSlotsForDuration(b.time, b.duration);
+         return otherSlots.includes(slot) && (b.assistantId === ast.id || b.assistantId2 === ast.id);
+       }));
+       return !bookedInAny;
+    });
+
+    if (availableAssistants.length === 0) {
+       setCardError(prev => ({ ...prev, [booking.virtualId]: '⚠️ No hay asistentes libres de turno para este rango.' }));
+       setTimeout(() => setCardError(prev => ({ ...prev, [booking.virtualId]: '' })), 5000);
+       return;
+    }
+
+    const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
+    try {
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id), {
+        [booking.dbKeyId]: assignedAssistant.id, 
+        [booking.dbKeyName]: assignedAssistant.name,
+        last_synced_date: booking.date,
+        last_synced_time: booking.time,
+        last_synced_duration: booking.duration
+      });
+      setCardError(prev => ({ ...prev, [booking.virtualId]: '' }));
+    } catch (err) { console.error("Assign error:", err); }
   };
 
   const handleUnassign = async (booking) => {
@@ -686,16 +706,25 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
       </div>
 
       <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
-        <h3 className="text-lg font-semibold text-slate-800 p-6 border-b border-slate-100 bg-slate-50">Citas Pendientes de Asignación - {selectedDate}</h3>
+        <h3 className="text-lg font-semibold text-slate-800 p-6 border-b border-slate-100 bg-slate-50">Citas y Disponibilidad - {selectedDate}</h3>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 p-6">
           {slots.map(slot => {
             const workingAssistants = assistants.filter(ast => {
               const scheduleBlocks = getAssistantScheduleForDay(ast, dayOfWeek);
               return isTimeInAnyBlock(slot, scheduleBlocks);
             });
-            const slotBookings = bookings.filter(b => b.date === selectedDate && formatCleanTime(b.time) === formatCleanTime(slot));
-            const availableCount = workingAssistants.length - slotBookings.length;
-            const myBookingsInSlot = slotBookings;
+
+            // Solo contamos como ocupadas aquellas citas que YA TIENEN una asistente asignada
+            const occupiedAssistantsCount = rawBookings.filter(b => {
+              if (b.date !== selectedDate) return false;
+              const coveredSlots = getSlotsForDuration(b.time, b.duration);
+              if (!coveredSlots.includes(slot)) return false;
+              return (b.assistantId && b.assistantId !== 'pendiente');
+            }).length;
+
+            const availableCount = workingAssistants.length - occupiedAssistantsCount;
+            const myBookingsInSlot = bookings.filter(b => b.date === selectedDate && formatCleanTime(b.time) === formatCleanTime(slot));
+
             let statusColor = "bg-slate-50 border-slate-200";
             if (availableCount <= 0 && workingAssistants.length > 0) statusColor = "bg-red-50 border-red-200";
             else if (availableCount > 0) statusColor = "bg-blue-50 border-blue-200 hover:shadow-md transition-shadow";
@@ -707,28 +736,85 @@ const DoctorView = ({ assistants, bookings, doctors }) => {
                   {availableCount <= 0 && workingAssistants.length > 0 ? <AlertCircle size={20} className="text-red-500" /> : null}
                 </div>
                 <div className="mb-3">
-                  {workingAssistants.length === 0 ? <span className="text-sm text-slate-500">Nadie en turno</span> : <span className={`text-sm font-medium ${availableCount > 0 ? 'text-blue-700' : 'text-red-700'}`}>{availableCount > 0 ? `${availableCount} Asistente(s) disponible(s)` : 'Turnos ocupados'}</span>}
+                  {workingAssistants.length === 0 ? (
+                    <span className="text-sm text-slate-500">Nadie en turno</span>
+                  ) : (
+                    <span className={`text-sm font-medium ${availableCount > 0 ? 'text-blue-700' : 'text-red-700'}`}>
+                      {availableCount > 0 ? `${availableCount} Asistente(s) disponible(s)` : 'Turnos ocupados'}
+                    </span>
+                  )}
                 </div>
                 <div className="space-y-2 mb-3">
                   {myBookingsInSlot.map(mb => {
                    const isUnassigned = mb.assistantId === 'pendiente';
                    const cardColor = isUnassigned ? "bg-red-50 border-red-200 text-red-900" : "bg-amber-100 border-amber-200 text-amber-900";
                     return (
-                      <div key={mb.virtualId} className={`${cardColor} border p-2 rounded-lg text-sm shadow-sm`}>
+                      <div key={mb.virtualId} className={`${cardColor} border p-3 rounded-lg text-sm shadow-sm space-y-1.5`}>
                          <div className="flex justify-between items-center mb-1">
-                           <span className="font-semibold flex items-center gap-1">{isUnassigned ? <AlertCircle size={14}/> : <CheckCircle size={14}/>} {mb.assistantName}</span>
+                           <span className="font-bold flex items-center gap-1">
+                             {isUnassigned ? <AlertCircle size={15} className="text-red-600"/> : <CheckCircle size={15} className="text-green-600"/>} 
+                             {mb.assistantName}
+                           </span>
                          </div>
-                         <div className="text-xs mb-1 font-medium text-slate-800"><Stethoscope size={12} className="inline mr-1 opacity-70"/> Dr(a): {mb.doctorName}</div>
-                         <div className="text-xs mb-1 opacity-90">Px: {mb.patientName}</div>
-                         {mb.comments && <div className="text-xs mb-2 opacity-80 italic flex items-start gap-1"><FileText size={12} className="mt-0.5 flex-shrink-0 opacity-70"/> <span>{mb.comments}</span></div>}
+                         <div className="text-xs font-medium text-slate-800"><Stethoscope size={12} className="inline mr-1 opacity-70"/> Dr(a): {mb.doctorName}</div>
+                         <div className="text-xs opacity-90"><User size={12} className="inline mr-1 opacity-70"/> Px: {mb.patientName}</div>
+                         {mb.comments && <div className="text-xs opacity-80 italic flex items-start gap-1"><FileText size={12} className="mt-0.5 flex-shrink-0 opacity-70"/> <span>{mb.comments}</span></div>}
                          
-                         {isUnassigned && mb.isFirstSlot !== false && (<button onClick={() => handleAssignToExisting(mb)} className="w-full py-2 mt-2 bg-blue-600 text-white rounded text-xs font-semibold hover:bg-blue-700 transition-colors shadow-sm">Asignar Asistente Disponible</button>)}
+                         {isUnassigned && mb.isFirstSlot !== false && (
+                           <div className="pt-2 space-y-2">
+                             {/* Selector manual para elegir a cualquier asistente */}
+                             <div className="space-y-1">
+                               <label className="text-[11px] font-semibold text-slate-600 block">Elegir Asistente Manual:</label>
+                               <select
+                                 value={selectedAssistantManual[mb.virtualId] || ''}
+                                 onChange={(e) => setSelectedAssistantManual(prev => ({ ...prev, [mb.virtualId]: e.target.value }))}
+                                 className="w-full text-xs p-1.5 border border-slate-300 rounded bg-white font-medium outline-none"
+                               >
+                                 <option value="">-- Auto-asignar libre --</option>
+                                 {assistants.map(a => {
+                                   const blocks = getAssistantScheduleForDay(a, dayOfWeek);
+                                   const onShift = isTimeInAnyBlock(mb.time, blocks);
+                                   return (
+                                     <option key={a.id} value={a.id}>
+                                       {a.name} {onShift ? ' (En turno)' : ' (Fuera de turno)'}
+                                     </option>
+                                   );
+                                 })}
+                               </select>
+                             </div>
+
+                             <button 
+                               onClick={() => handleAssignSelectedAssistant(mb)} 
+                               className="w-full py-2 bg-blue-600 text-white rounded text-xs font-semibold hover:bg-blue-700 transition-colors shadow-sm flex items-center justify-center gap-1.5"
+                             >
+                               <Check size={14} /> Asignar Asistente
+                             </button>
+
+                             {cardError[mb.virtualId] && (
+                               <p className="text-[11px] text-red-600 font-semibold bg-red-100 p-1.5 rounded text-center">
+                                 {cardError[mb.virtualId]}
+                               </p>
+                             )}
+                           </div>
+                         )}
                          
-                         {!isUnassigned && mb.isFirstSlot !== false && (<button onClick={() => handleUnassign(mb)} className="w-full py-1.5 mt-1 bg-white/80 text-orange-600 rounded text-xs font-semibold hover:bg-white transition-colors shadow-sm">Liberar Asistente</button>)}
+                         {!isUnassigned && mb.isFirstSlot !== false && (
+                           <button onClick={() => handleUnassign(mb)} className="w-full py-1.5 mt-2 bg-white/80 text-orange-600 rounded text-xs font-semibold hover:bg-white transition-colors shadow-sm">
+                             Liberar Asistente
+                           </button>
+                         )}
                          
-                         {mb.isFirstSlot !== false && (<button onClick={() => handleCancel(mb)} className="w-full py-1.5 mt-1 bg-white/80 text-red-600 rounded text-xs font-semibold hover:bg-white transition-colors shadow-sm">Eliminar Cita</button>)}
+                         {mb.isFirstSlot !== false && (
+                           <button onClick={() => handleCancel(mb)} className="w-full py-1 mt-1 bg-white/80 text-red-600 rounded text-xs font-semibold hover:bg-white transition-colors shadow-sm">
+                             Eliminar Cita
+                           </button>
+                         )}
                          
-                         {mb.isFirstSlot === false && (<div className={`text-center text-[10px] mt-1 opacity-60 font-medium ${isUnassigned ? 'text-red-700' : 'text-amber-700'}`}>Bloque en curso</div>)}
+                         {mb.isFirstSlot === false && (
+                           <div className={`text-center text-[10px] pt-1 opacity-60 font-medium ${isUnassigned ? 'text-red-700' : 'text-amber-700'}`}>
+                             Bloque en curso
+                           </div>
+                         )}
                       </div>
                     );
                   })}
@@ -1201,9 +1287,7 @@ const App = () => {
   useEffect(() => {
     if (assistants.length === 0 || rawBookings.length === 0) return;
 
-    // Clonamos el estado actual de las citas en memoria para reservar los cupos al instante
     let simulatedBookings = rawBookings.map(b => ({ ...b }));
-    let hasUpdates = false;
 
     for (let i = 0; i < simulatedBookings.length; i++) {
       let pendingDoc = simulatedBookings[i];
@@ -1220,16 +1304,13 @@ const App = () => {
       const requiredSlots = getSlotsForDuration(pendingDoc.time, pendingDoc.duration);
       const dayOfWeek = getDayOfWeek(pendingDoc.date);
 
-      // Verificamos qué asistentes están libres según el estado simulado en memoria
       const availableAssistants = assistants.filter(ast => {
         if (siblingIdValue === ast.id) return false;
 
-        // 1. Debe estar en turno durante TODOS los slots requeridos
         const scheduleBlocks = getAssistantScheduleForDay(ast, dayOfWeek);
         const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, scheduleBlocks));
         if (!workingAll) return false;
 
-        // 2. Comprobar que NO esté ya ocupada en NINGUNO de los slots en las citas simuladas
         const bookedInAny = requiredSlots.some(slot => 
           simulatedBookings.some(otherDoc => {
             if (otherDoc.id === pendingDoc.id) return false;
@@ -1248,15 +1329,11 @@ const App = () => {
       });
 
       if (availableAssistants.length > 0) {
-        // Asignar asistente
         const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
 
-        // Actualizar la simulación en memoria INMEDIATAMENTE para que la siguiente cita de este ciclo no la vuelva a elegir
         pendingDoc[dbKeyId] = assignedAssistant.id;
         pendingDoc[dbKeyName] = assignedAssistant.name;
-        hasUpdates = true;
 
-        // Enviar actualización a Firebase
         updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', pendingDoc.id), {
           [dbKeyId]: assignedAssistant.id,
           [dbKeyName]: assignedAssistant.name,
@@ -1287,7 +1364,7 @@ const App = () => {
       </header>
       <main className="max-w-6xl mx-auto px-4 py-8">
         {role === 'admin' && <AdminView assistants={assistants} doctors={doctors} rotations={rotations} />}
-        {role === 'doctor' && <DoctorView assistants={assistants} bookings={expandedBookings} doctors={doctors} />}
+        {role === 'doctor' && <DoctorView assistants={assistants} bookings={expandedBookings} doctors={doctors} rawBookings={rawBookings} />}
         {role === 'assistant' && (
           <AssistantView
             assistants={assistants}
