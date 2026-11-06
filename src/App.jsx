@@ -1,8 +1,28 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc, addDoc, updateDoc } from 'firebase/firestore';
-import { Calendar, Clock, User, UserPlus, Trash2, CheckCircle, XCircle, AlertCircle, Shield, Stethoscope, Users, Pencil, FileText, LayoutGrid, RefreshCw, Bell, ClipboardList, Send, Filter, Check } from 'lucide-react';
+import { 
+  getAuth, 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, 
+  signOut, 
+  onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  getFirestore, 
+  collection, 
+  onSnapshot, 
+  doc, 
+  setDoc, 
+  deleteDoc, 
+  addDoc, 
+  updateDoc, 
+  getDocs 
+} from 'firebase/firestore';
+import { 
+  Calendar, Clock, User, UserPlus, Trash2, CheckCircle, XCircle, 
+  AlertCircle, Shield, Stethoscope, Users, Pencil, FileText, LayoutGrid, 
+  RefreshCw, Bell, ClipboardList, Send, Filter, Check, LogOut, Lock, Mail, Key, ShieldCheck
+} from 'lucide-react';
 
 // --- FIREBASE INITIALIZATION ---
 const firebaseConfig = {
@@ -107,8 +127,165 @@ const getAssistantScheduleForDay = (assistant, dayIndex) => {
   return assistant.schedule[dayIndex] || assistant.schedule[String(dayIndex)] || [];
 };
 
-// --- COMPONENTS ---
+// --- AUTH SCREEN COMPONENT ---
+const AuthScreen = ({ onLoginSuccess }) => {
+  const [isRegister, setIsRegister] = useState(false);
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
 
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+
+    try {
+      if (isRegister) {
+        if (!name.trim()) {
+          setError('Por favor ingresa tu nombre completo.');
+          setLoading(false);
+          return;
+        }
+
+        const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
+        const usersRef = collection(db, 'artifacts', appId, 'public', 'data', 'users');
+        const snapshot = await getDocs(usersRef);
+        
+        // Si es el primer usuario de la app, se crea como Administrador activo
+        const isFirstUser = snapshot.empty;
+        const initialRole = isFirstUser ? 'admin' : 'pendiente';
+        const initialStatus = isFirstUser ? 'active' : 'pending';
+
+        await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', cred.user.uid), {
+          uid: cred.user.uid,
+          name: name.trim(),
+          email: email.trim().toLowerCase(),
+          role: initialRole,
+          status: initialStatus,
+          createdAt: new Date().toISOString()
+        });
+
+      } else {
+        await signInWithEmailAndPassword(auth, email.trim(), password);
+      }
+    } catch (err) {
+      console.error(err);
+      if (err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
+        setError('Correo electrónico o contraseña incorrectos.');
+      } else if (err.code === 'auth/email-already-in-use') {
+        setError('Este correo ya está registrado.');
+      } else if (err.code === 'auth/weak-password') {
+        setError('La contraseña debe tener al menos 6 caracteres.');
+      } else {
+        setError('Error al procesar la solicitud: ' + (err.message || ''));
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl shadow-xl max-w-md w-full overflow-hidden border border-slate-200 animate-in fade-in zoom-in duration-200">
+        <div className="bg-blue-600 p-8 text-white text-center">
+          <div className="w-14 h-14 bg-white/20 rounded-2xl flex items-center justify-center mx-auto mb-3 shadow-inner">
+            <Stethoscope className="w-8 h-8 text-white" />
+          </div>
+          <h2 className="text-2xl font-bold tracking-tight">Molaria Assist<span className="text-blue-200 font-light">Hub</span></h2>
+          <p className="text-xs text-blue-100 mt-1">Control Operativo y Gestión Clínica</p>
+        </div>
+
+        <div className="p-8">
+          <div className="flex border-b border-slate-200 mb-6">
+            <button
+              type="button"
+              onClick={() => { setIsRegister(false); setError(''); }}
+              className={`flex-1 pb-3 text-sm font-semibold transition-colors border-b-2 ${!isRegister ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-400 hover:text-slate-600'}`}
+            >
+              Iniciar Sesión
+            </button>
+            <button
+              type="button"
+              onClick={() => { setIsRegister(true); setError(''); }}
+              className={`flex-1 pb-3 text-sm font-semibold transition-colors border-b-2 ${isRegister ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-400 hover:text-slate-600'}`}
+            >
+              Registrarse
+            </button>
+          </div>
+
+          {error && (
+            <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded-xl flex items-center gap-2">
+              <AlertCircle size={16} className="flex-shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
+
+          <form onSubmit={handleSubmit} className="space-y-4">
+            {isRegister && (
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Nombre Completo</label>
+                <div className="relative">
+                  <User size={16} className="absolute left-3 top-3 text-slate-400" />
+                  <input
+                    type="text"
+                    required
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="Ej. Dra. Diana Antelo"
+                    className="w-full pl-9 pr-3 py-2.5 border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                  />
+                </div>
+              </div>
+            )}
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">Correo Electrónico</label>
+              <div className="relative">
+                <Mail size={16} className="absolute left-3 top-3 text-slate-400" />
+                <input
+                  type="email"
+                  required
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="usuario@clinica.com"
+                  className="w-full pl-9 pr-3 py-2.5 border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">Contraseña</label>
+              <div className="relative">
+                <Key size={16} className="absolute left-3 top-3 text-slate-400" />
+                <input
+                  type="password"
+                  required
+                  minLength={6}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full pl-9 pr-3 py-2.5 border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                />
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white font-semibold rounded-xl text-sm transition-all shadow-md shadow-blue-600/20 mt-2"
+            >
+              {loading ? 'Procesando...' : isRegister ? 'Crear Cuenta' : 'Entrar al Sistema'}
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// --- ROTATION MODAL ---
 const RotationModal = ({ isOpen, onClose, assistants, selectedAssistantId, selectedDate, timeSlot, onSave }) => {
   const [assistantId, setAssistantId] = useState(selectedAssistantId || '');
   const [activity, setActivity] = useState('');
@@ -210,7 +387,8 @@ const RotationModal = ({ isOpen, onClose, assistants, selectedAssistantId, selec
   );
 };
 
-const AdminView = ({ assistants, doctors, rotations }) => {
+// --- ADMIN VIEW WITH USERS MANAGEMENT ---
+const AdminView = ({ assistants, doctors, rotations, usersList }) => {
   const [activeTab, setActiveTab] = useState('assistants'); 
   const [name, setName] = useState('');
   const defaultSchedule = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [], 6: [] };
@@ -318,23 +496,135 @@ const AdminView = ({ assistants, doctors, rotations }) => {
     }
   };
 
+  // GESTIÓN DE ROLES DE USUARIOS
+  const handleUpdateUserRole = async (userId, newRole) => {
+    try {
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', userId), {
+        role: newRole,
+        status: newRole === 'pendiente' ? 'pending' : 'active'
+      });
+    } catch (err) {
+      console.error("Error updating user role:", err);
+    }
+  };
+
+  const handleToggleUserStatus = async (userId, currentStatus) => {
+    try {
+      const newStatus = currentStatus === 'active' ? 'pending' : 'active';
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', userId), {
+        status: newStatus
+      });
+    } catch (err) {
+      console.error("Error toggling user status:", err);
+    }
+  };
+
+  const handleDeleteUser = async (userId) => {
+    if (!window.confirm("¿Seguro que deseas eliminar este usuario del sistema?")) return;
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', userId));
+    } catch (err) {
+      console.error("Error deleting user:", err);
+    }
+  };
+
   const filteredRotations = useMemo(() => {
     return rotations.filter(r => r.date === filterRotationDate);
   }, [rotations, filterRotationDate]);
 
   return (
     <div className="space-y-6">
-      <div className="flex gap-2 bg-white p-2 rounded-xl shadow-sm border border-slate-100">
-        <button onClick={() => setActiveTab('assistants')} className={`flex-1 py-2 px-4 rounded-lg font-medium transition-colors flex items-center justify-center gap-2 ${activeTab === 'assistants' ? 'bg-blue-600 text-white' : 'bg-transparent text-slate-600 hover:bg-slate-50'}`}>
-          <UserPlus size={18} /> Asistentes
+      <div className="flex gap-2 bg-white p-2 rounded-xl shadow-sm border border-slate-100 flex-wrap">
+        <button onClick={() => setActiveTab('assistants')} className={`flex-1 min-w-[120px] py-2 px-3 rounded-lg font-medium transition-colors flex items-center justify-center gap-2 text-sm ${activeTab === 'assistants' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>
+          <UserPlus size={16} /> Asistentes
         </button>
-        <button onClick={() => setActiveTab('doctors')} className={`flex-1 py-2 px-4 rounded-lg font-medium transition-colors flex items-center justify-center gap-2 ${activeTab === 'doctors' ? 'bg-blue-600 text-white' : 'bg-transparent text-slate-600 hover:bg-slate-50'}`}>
-          <Stethoscope size={18} /> Doctores
+        <button onClick={() => setActiveTab('doctors')} className={`flex-1 min-w-[120px] py-2 px-3 rounded-lg font-medium transition-colors flex items-center justify-center gap-2 text-sm ${activeTab === 'doctors' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>
+          <Stethoscope size={16} /> Doctores
         </button>
-        <button onClick={() => setActiveTab('rotations')} className={`flex-1 py-2 px-4 rounded-lg font-medium transition-colors flex items-center justify-center gap-2 ${activeTab === 'rotations' ? 'bg-amber-500 text-white' : 'bg-transparent text-slate-600 hover:bg-slate-50'}`}>
-          <ClipboardList size={18} /> Bitácora de Rotaciones
+        <button onClick={() => setActiveTab('users')} className={`flex-1 min-w-[120px] py-2 px-3 rounded-lg font-medium transition-colors flex items-center justify-center gap-2 text-sm ${activeTab === 'users' ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>
+          <ShieldCheck size={16} /> Usuarios & Permisos
+        </button>
+        <button onClick={() => setActiveTab('rotations')} className={`flex-1 min-w-[120px] py-2 px-3 rounded-lg font-medium transition-colors flex items-center justify-center gap-2 text-sm ${activeTab === 'rotations' ? 'bg-amber-500 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>
+          <ClipboardList size={16} /> Bitácora
         </button>
       </div>
+
+      {activeTab === 'users' && (
+        <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
+          <div className="p-6 border-b border-slate-100 bg-indigo-50/50 flex justify-between items-center">
+            <div>
+              <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                <ShieldCheck size={20} className="text-indigo-600" />
+                Control de Accesos y Permisos
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">Aprueba cuentas y asigna roles (Admin, Doctor, Asistente) para restringir acciones críticas.</p>
+            </div>
+            <span className="text-xs font-semibold bg-indigo-100 text-indigo-800 px-3 py-1 rounded-full">{usersList.length} registrados</span>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse text-sm">
+              <thead>
+                <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 text-xs font-semibold">
+                  <th className="p-4">Usuario</th>
+                  <th className="p-4">Correo</th>
+                  <th className="p-4">Rol Asignado</th>
+                  <th className="p-4">Estado</th>
+                  <th className="p-4 text-center">Acciones</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {usersList.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="p-6 text-center text-slate-400">No hay usuarios registrados.</td>
+                  </tr>
+                ) : (
+                  usersList.map(u => (
+                    <tr key={u.id} className="hover:bg-slate-50/80 transition-colors">
+                      <td className="p-4 font-bold text-slate-800 flex items-center gap-2">
+                        <div className="w-8 h-8 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center font-semibold text-xs">
+                          {u.name ? u.name.charAt(0).toUpperCase() : 'U'}
+                        </div>
+                        {u.name || 'Sin Nombre'}
+                      </td>
+                      <td className="p-4 text-slate-600 font-mono text-xs">{u.email}</td>
+                      <td className="p-4">
+                        <select
+                          value={u.role || 'pendiente'}
+                          onChange={(e) => handleUpdateUserRole(u.id, e.target.value)}
+                          className="p-1.5 border border-slate-300 rounded-lg text-xs font-medium bg-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                        >
+                          <option value="pendiente">-- Pendiente --</option>
+                          <option value="admin">Administrador (Control Total)</option>
+                          <option value="doctor">Doctor(a)</option>
+                          <option value="assistant">Asistente</option>
+                        </select>
+                      </td>
+                      <td className="p-4">
+                        <button
+                          onClick={() => handleToggleUserStatus(u.id, u.status)}
+                          className={`text-xs px-2.5 py-1 rounded-full font-semibold transition-colors ${u.status === 'active' ? 'bg-green-100 text-green-700 hover:bg-green-200' : 'bg-amber-100 text-amber-700 hover:bg-amber-200'}`}
+                        >
+                          {u.status === 'active' ? 'Activo' : 'Pendiente'}
+                        </button>
+                      </td>
+                      <td className="p-4 text-center">
+                        <button
+                          onClick={() => handleDeleteUser(u.id)}
+                          className="text-red-400 hover:text-red-600 p-1.5 rounded-lg hover:bg-red-50 transition-colors"
+                          title="Eliminar usuario"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {activeTab === 'assistants' && (
         <>
@@ -559,9 +849,10 @@ const AdminView = ({ assistants, doctors, rotations }) => {
   );
 };
 
-const DoctorView = ({ assistants, bookings, doctors, rawBookings }) => {
+// --- DOCTOR VIEW ---
+const DoctorView = ({ assistants, bookings, doctors, rawBookings, userProfile }) => {
   const [selectedDate, setSelectedDate] = useState(getTodayString());
-  const [doctorId, setDoctorId] = useState(''); 
+  const [doctorId, setDoctorId] = useState(userProfile?.name || ''); 
   const [patientName, setPatientName] = useState('');
   const [duration, setDuration] = useState(60); 
   const [comments, setComments] = useState('');
@@ -593,11 +884,9 @@ const DoctorView = ({ assistants, bookings, doctors, rawBookings }) => {
     } catch (err) { console.error("Booking error:", err); }
   };
 
-  // Asignar asistente específica elegida del menú desplegable o aleatoria
   const handleAssignSelectedAssistant = async (booking) => {
     const chosenAstId = selectedAssistantManual[booking.virtualId];
     
-    // Si eligió una asistente puntual del dropdown
     if (chosenAstId) {
       const ast = assistants.find(a => a.id === chosenAstId);
       if (!ast) return;
@@ -616,7 +905,6 @@ const DoctorView = ({ assistants, bookings, doctors, rawBookings }) => {
       return;
     }
 
-    // Si no seleccionó ninguna y le dio a auto-asignar con el botón
     const requiredSlots = getSlotsForDuration(booking.time, booking.duration);
     const dayOfWeek = getDayOfWeek(booking.date);
 
@@ -655,7 +943,12 @@ const DoctorView = ({ assistants, bookings, doctors, rawBookings }) => {
     } catch (err) { console.error("Assign error:", err); }
   };
 
+  // Solo administradores pueden liberar una asistente asignada
   const handleUnassign = async (booking) => {
+      if (userProfile?.role !== 'admin') {
+        alert("Acción restringida: Solo un Administrador puede liberar a una asistente asignada.");
+        return;
+      }
       try {
         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id), {
           [booking.dbKeyId]: 'pendiente', 
@@ -714,7 +1007,6 @@ const DoctorView = ({ assistants, bookings, doctors, rawBookings }) => {
               return isTimeInAnyBlock(slot, scheduleBlocks);
             });
 
-            // Solo contamos como ocupadas aquellas citas que YA TIENEN una asistente asignada
             const occupiedAssistantsCount = rawBookings.filter(b => {
               if (b.date !== selectedDate) return false;
               const coveredSlots = getSlotsForDuration(b.time, b.duration);
@@ -762,7 +1054,6 @@ const DoctorView = ({ assistants, bookings, doctors, rawBookings }) => {
                          
                          {isUnassigned && mb.isFirstSlot !== false && (
                            <div className="pt-2 space-y-2">
-                             {/* Selector manual para elegir a cualquier asistente */}
                              <div className="space-y-1">
                                <label className="text-[11px] font-semibold text-slate-600 block">Elegir Asistente Manual:</label>
                                <select
@@ -798,13 +1089,17 @@ const DoctorView = ({ assistants, bookings, doctors, rawBookings }) => {
                            </div>
                          )}
                          
-                         {!isUnassigned && mb.isFirstSlot !== false && (
-                           <button onClick={() => handleUnassign(mb)} className="w-full py-1.5 mt-2 bg-white/80 text-orange-600 rounded text-xs font-semibold hover:bg-white transition-colors shadow-sm">
-                             Liberar Asistente
+                         {/* SEGURIDAD: Solo el Administrador puede liberar una asistente */}
+                         {!isUnassigned && mb.isFirstSlot !== false && userProfile?.role === 'admin' && (
+                           <button 
+                             onClick={() => handleUnassign(mb)} 
+                             className="w-full py-1.5 mt-2 bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 rounded text-xs font-semibold transition-colors shadow-sm flex items-center justify-center gap-1"
+                           >
+                             <Lock size={12} /> Liberar Asistente (Admin)
                            </button>
                          )}
                          
-                         {mb.isFirstSlot !== false && (
+                         {mb.isFirstSlot !== false && userProfile?.role === 'admin' && (
                            <button onClick={() => handleCancel(mb)} className="w-full py-1 mt-1 bg-white/80 text-red-600 rounded text-xs font-semibold hover:bg-white transition-colors shadow-sm">
                              Eliminar Cita
                            </button>
@@ -829,7 +1124,8 @@ const DoctorView = ({ assistants, bookings, doctors, rawBookings }) => {
   );
 };
 
-const AssistantView = ({ assistants, bookings, doctors, globalAgenda, rotations, onSaveRotation }) => {
+// --- ASSISTANT VIEW ---
+const AssistantView = ({ assistants, bookings, doctors, globalAgenda, rotations, onSaveRotation, userProfile }) => {
   const [selectedAssistantId, setSelectedAssistantId] = useState('');
   const [selectedDate, setSelectedDate] = useState(getTodayString());
   const [viewMode, setViewMode] = useState('personal'); 
@@ -840,11 +1136,19 @@ const AssistantView = ({ assistants, bookings, doctors, globalAgenda, rotations,
   const lastNotifiedHour = useRef('');
   const slots = useMemo(() => generateTimeSlots(8, 20), []);
 
+  // Pre-seleccionar la asistente según su perfil registrado si coincide
   useEffect(() => {
+    if (userProfile?.name) {
+      const match = assistants.find(a => a.name.toLowerCase().trim() === userProfile.name.toLowerCase().trim());
+      if (match) {
+        setSelectedAssistantId(match.id);
+        return;
+      }
+    }
     if (!selectedAssistantId && assistants.length > 0) {
       setSelectedAssistantId(assistants[0].id);
     }
-  }, [assistants, selectedAssistantId]);
+  }, [assistants, selectedAssistantId, userProfile]);
 
   const requestNotificationPermission = async () => {
     if (typeof Notification !== 'undefined') {
@@ -939,7 +1243,6 @@ const AssistantView = ({ assistants, bookings, doctors, globalAgenda, rotations,
 
   return (
     <div className="space-y-6">
-      {/* BARRA DE ESTADO DE NOTIFICACIONES */}
       {notifPermission !== 'granted' && typeof Notification !== 'undefined' && (
         <div className="bg-amber-50 border border-amber-200 p-4 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-sm">
           <div className="flex items-center gap-3">
@@ -1133,7 +1436,6 @@ const AssistantView = ({ assistants, bookings, doctors, globalAgenda, rotations,
         </div>
       )}
 
-      {/* MODAL POP-UP DE REGISTRO DE ROTACIÓN */}
       <RotationModal
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
@@ -1147,14 +1449,17 @@ const AssistantView = ({ assistants, bookings, doctors, globalAgenda, rotations,
   );
 };
 
+// --- MAIN APP COMPONENT ---
 const App = () => {
-  const [user, setUser] = useState(null);
-  const [role, setRole] = useState('doctor'); 
+  const [currentUser, setCurrentUser] = useState(null);
+  const [userProfile, setUserProfile] = useState(null);
+  const [roleView, setRoleView] = useState('doctor'); 
   const [assistants, setAssistants] = useState([]);
   const [doctors, setDoctors] = useState([]);
   const [rawBookings, setRawBookings] = useState([]);
   const [globalAgenda, setGlobalAgenda] = useState([]);
   const [rotations, setRotations] = useState([]);
+  const [usersList, setUsersList] = useState([]);
   const [loading, setLoading] = useState(true);
 
   const handleSaveRotation = async (rotationData) => {
@@ -1166,31 +1471,68 @@ const App = () => {
     }
   };
 
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      setUserProfile(null);
+      setCurrentUser(null);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  // 1. Escuchar estado de autenticación
   useEffect(() => {
-    const initAuth = async () => {
-      try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) await signInWithCustomToken(auth, __initial_auth_token);
-        else await signInAnonymously(auth);
-      } catch (error) { console.error("Auth error:", error); }
-    };
-    initAuth();
-    const unsubscribe = onAuthStateChanged(auth, (usr) => setUser(usr));
+    const unsubscribe = onAuthStateChanged(auth, (usr) => {
+      setCurrentUser(usr);
+      if (!usr) {
+        setUserProfile(null);
+        setLoading(false);
+      }
+    });
     return () => unsubscribe();
   }, []);
 
-  // Fetch data
+  // 2. Escuchar perfil de usuario conectado y lista de usuarios
   useEffect(() => {
-    if (!user) return;
+    if (!currentUser) return;
+
+    // Listener perfil usuario actual
+    const userDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'users', currentUser.uid);
+    const unsubUser = onSnapshot(userDocRef, (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        setUserProfile(data);
+        if (data.role === 'admin') setRoleView('admin');
+        else if (data.role === 'doctor') setRoleView('doctor');
+        else if (data.role === 'assistant') setRoleView('assistant');
+      } else {
+        // En caso de que no exista el doc aún
+        setUserProfile({ role: 'pendiente', status: 'pending' });
+      }
+    });
+
+    // Listener de todos los usuarios para el Admin
+    const usersCollRef = collection(db, 'artifacts', appId, 'public', 'data', 'users');
+    const unsubUsersList = onSnapshot(usersCollRef, (snap) => {
+      setUsersList(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+
+    return () => { unsubUser(); unsubUsersList(); };
+  }, [currentUser]);
+
+  // 3. Cargar datos clínicos generales de Firestore
+  useEffect(() => {
+    if (!currentUser) return;
+
     const asstRef = collection(db, 'artifacts', appId, 'public', 'data', 'assistants');
     const unsubAssistants = onSnapshot(asstRef, (snap) => setAssistants(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a,b) => (a.name||'').localeCompare(b.name||''))));
     const docRef = collection(db, 'artifacts', appId, 'public', 'data', 'doctors');
     const unsubDoctors = onSnapshot(docRef, (snap) => setDoctors(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a,b) => (a.name||'').localeCompare(b.name||''))));
 
-    // COBERTURA DE ROTACIONES
     const rotRef = collection(db, 'artifacts', appId, 'public', 'data', 'rotations');
     const unsubRotations = onSnapshot(rotRef, (snap) => setRotations(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a,b) => (b.timestamp||'').localeCompare(a.timestamp||''))));
 
-    // COBERTURA 1: Citas que requieren asistente (Robot Activo)
     const bookRef = collection(db, 'artifacts', appId, 'public', 'data', 'bookings');
     const unsubBookings = onSnapshot(bookRef, (snapshot) => {
       let docsList = [];
@@ -1230,7 +1572,6 @@ const App = () => {
       setRawBookings(docsList);
     });
 
-    // COBERTURA 2: Agenda Global Completa (Visual Espejo)
     const agendaRef = collection(db, 'artifacts', appId, 'public', 'data', 'agenda_global');
     const unsubGlobalAgenda = onSnapshot(agendaRef, (snapshot) => {
       let expandedGlobal = [];
@@ -1253,7 +1594,7 @@ const App = () => {
     });
 
     return () => { unsubAssistants(); unsubDoctors(); unsubBookings(); unsubGlobalAgenda(); unsubRotations(); };
-  }, [user]);
+  }, [currentUser]);
 
   // EXPANDIR CITAS A SLOTS DE 15 MINUTOS PARA LA VISTA
   const expandedBookings = useMemo(() => {
@@ -1283,7 +1624,7 @@ const App = () => {
     return result;
   }, [rawBookings]);
 
-  // MOTOR DE AUTO-ASIGNACIÓN SIN CONDICIÓN DE CARRERA (Secuencial con simulación en memoria)
+  // MOTOR DE AUTO-ASIGNACIÓN SIN CONDICIÓN DE CARRERA
   useEffect(() => {
     if (assistants.length === 0 || rawBookings.length === 0) return;
 
@@ -1345,27 +1686,120 @@ const App = () => {
     }
   }, [rawBookings, assistants]);
 
-  if (loading) return <div className="min-h-screen bg-slate-50 flex items-center justify-center text-blue-600 font-medium">Cargando Sistema...</div>;
+  // PANTALLA 1: No autenticado
+  if (!currentUser) {
+    return <AuthScreen onLoginSuccess={() => setLoading(false)} />;
+  }
+
+  // PANTALLA 2: Cargando sesión
+  if (loading || !userProfile) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center text-blue-600 font-medium">
+        Cargando Sistema Clínico...
+      </div>
+    );
+  }
+
+  // PANTALLA 3: Cuenta pendiente de aprobación
+  if (userProfile.status !== 'active') {
+    return (
+      <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
+        <div className="bg-white p-8 rounded-2xl shadow-xl max-w-md w-full text-center border border-slate-200">
+          <div className="w-16 h-16 bg-amber-100 text-amber-600 rounded-full flex items-center justify-center mx-auto mb-4">
+            <Lock size={32} />
+          </div>
+          <h2 className="text-xl font-bold text-slate-800 mb-2">Cuenta en Espera de Aprobación</h2>
+          <p className="text-sm text-slate-600 mb-6 leading-relaxed">
+            Hola <strong>{userProfile.name || currentUser.email}</strong>. Tu cuenta ha sido registrada con éxito, pero requiere que el <strong>Administrador de la clínica</strong> te asigne un rol y apruebe tu acceso.
+          </p>
+          <button
+            onClick={handleLogout}
+            className="w-full py-2.5 bg-slate-200 hover:bg-slate-300 text-slate-700 font-semibold rounded-xl text-sm transition-colors flex items-center justify-center gap-2"
+          >
+            <LogOut size={16} /> Cerrar Sesión
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const roleBadgeColor = {
+    admin: 'bg-indigo-100 text-indigo-800 border-indigo-200',
+    doctor: 'bg-blue-100 text-blue-800 border-blue-200',
+    assistant: 'bg-emerald-100 text-emerald-800 border-emerald-200'
+  }[userProfile.role] || 'bg-slate-100 text-slate-800';
+
+  const roleLabel = {
+    admin: 'Administrador',
+    doctor: 'Doctor(a)',
+    assistant: 'Asistente'
+  }[userProfile.role] || 'Usuario';
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 font-sans">
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-20">
+      <header className="bg-white border-b border-slate-200 sticky top-0 z-20 shadow-sm">
         <div className="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2 text-blue-700">
             <Stethoscope size={24} />
             <h1 className="text-xl font-bold tracking-tight">Molaria Assist<span className="text-blue-400 font-light">Hub</span></h1>
           </div>
-          <div className="flex bg-slate-100 p-1 rounded-lg">
-            <button onClick={() => setRole('admin')} className={`px-3 py-1.5 text-sm rounded-md transition-all flex items-center gap-1 ${role === 'admin' ? 'bg-white shadow-sm text-blue-700 font-medium' : 'text-slate-600 hover:text-slate-900'}`}><Shield size={16} /> Admin</button>
-            <button onClick={() => setRole('doctor')} className={`px-3 py-1.5 text-sm rounded-md transition-all flex items-center gap-1 ${role === 'doctor' ? 'bg-white shadow-sm text-blue-700 font-medium' : 'text-slate-600 hover:text-slate-900'}`}><Stethoscope size={16} /> Doctor</button>
-            <button onClick={() => setRole('assistant')} className={`px-3 py-1.5 text-sm rounded-md transition-all flex items-center gap-1 ${role === 'assistant' ? 'bg-white shadow-sm text-blue-700 font-medium' : 'text-slate-600 hover:text-slate-900'}`}><User size={16} /> Asistente</button>
+
+          <div className="flex items-center gap-3">
+            {/* Solo el Administrador puede alternar entre vistas */}
+            {userProfile.role === 'admin' ? (
+              <div className="hidden sm:flex bg-slate-100 p-1 rounded-lg">
+                <button onClick={() => setRoleView('admin')} className={`px-3 py-1.5 text-xs rounded-md transition-all flex items-center gap-1 ${roleView === 'admin' ? 'bg-white shadow-sm text-blue-700 font-bold' : 'text-slate-600 hover:text-slate-900'}`}><Shield size={14} /> Admin</button>
+                <button onClick={() => setRoleView('doctor')} className={`px-3 py-1.5 text-xs rounded-md transition-all flex items-center gap-1 ${roleView === 'doctor' ? 'bg-white shadow-sm text-blue-700 font-bold' : 'text-slate-600 hover:text-slate-900'}`}><Stethoscope size={14} /> Doctor</button>
+                <button onClick={() => setRoleView('assistant')} className={`px-3 py-1.5 text-xs rounded-md transition-all flex items-center gap-1 ${roleView === 'assistant' ? 'bg-white shadow-sm text-blue-700 font-bold' : 'text-slate-600 hover:text-slate-900'}`}><User size={14} /> Asistente</button>
+              </div>
+            ) : null}
+
+            {/* Perfil del usuario conectado */}
+            <div className="flex items-center gap-2 border-l border-slate-200 pl-3">
+              <div className="text-right hidden sm:block">
+                <p className="text-xs font-bold text-slate-800 leading-tight">{userProfile.name || currentUser.email}</p>
+                <span className={`inline-block text-[10px] font-semibold px-2 py-0.5 rounded-full border ${roleBadgeColor}`}>
+                  {roleLabel}
+                </span>
+              </div>
+
+              <button
+                onClick={handleLogout}
+                className="p-2 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                title="Cerrar Sesión"
+              >
+                <LogOut size={18} />
+              </button>
+            </div>
           </div>
         </div>
       </header>
+
       <main className="max-w-6xl mx-auto px-4 py-8">
-        {role === 'admin' && <AdminView assistants={assistants} doctors={doctors} rotations={rotations} />}
-        {role === 'doctor' && <DoctorView assistants={assistants} bookings={expandedBookings} doctors={doctors} rawBookings={rawBookings} />}
-        {role === 'assistant' && (
+        {/* Renderizado condicional estricto por roles */}
+        {userProfile.role === 'admin' && (
+          <>
+            {roleView === 'admin' && <AdminView assistants={assistants} doctors={doctors} rotations={rotations} usersList={usersList} />}
+            {roleView === 'doctor' && <DoctorView assistants={assistants} bookings={expandedBookings} doctors={doctors} rawBookings={rawBookings} userProfile={userProfile} />}
+            {roleView === 'assistant' && (
+              <AssistantView
+                assistants={assistants}
+                bookings={expandedBookings}
+                doctors={doctors}
+                globalAgenda={globalAgenda}
+                rotations={rotations}
+                onSaveRotation={handleSaveRotation}
+                userProfile={userProfile}
+              />
+            )}
+          </>
+        )}
+
+        {userProfile.role === 'doctor' && (
+          <DoctorView assistants={assistants} bookings={expandedBookings} doctors={doctors} rawBookings={rawBookings} userProfile={userProfile} />
+        )}
+
+        {userProfile.role === 'assistant' && (
           <AssistantView
             assistants={assistants}
             bookings={expandedBookings}
@@ -1373,11 +1807,12 @@ const App = () => {
             globalAgenda={globalAgenda}
             rotations={rotations}
             onSaveRotation={handleSaveRotation}
+            userProfile={userProfile}
           />
         )}
       </main>
     </div>
   );
-}
+};
 
 export default App;
