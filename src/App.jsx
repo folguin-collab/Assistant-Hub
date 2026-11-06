@@ -1197,17 +1197,21 @@ const App = () => {
     return result;
   }, [rawBookings]);
 
-  // MOTOR DE AUTO-ASIGNACIÓN AUTOMÁTICA
+  // MOTOR DE AUTO-ASIGNACIÓN SIN CONDICIÓN DE CARRERA (Secuencial con simulación en memoria)
   useEffect(() => {
     if (assistants.length === 0 || rawBookings.length === 0) return;
 
-    // Recorrer todas las citas pendientes
-    rawBookings.forEach(pendingDoc => {
+    // Clonamos el estado actual de las citas en memoria para reservar los cupos al instante
+    let simulatedBookings = rawBookings.map(b => ({ ...b }));
+    let hasUpdates = false;
+
+    for (let i = 0; i < simulatedBookings.length; i++) {
+      let pendingDoc = simulatedBookings[i];
       const isDoble = typeof pendingDoc.comments === 'string' && pendingDoc.comments.toLowerCase().includes('#doble');
       const needsFirst = !pendingDoc.assistantId || pendingDoc.assistantId === 'pendiente';
       const needsSecond = isDoble && (!pendingDoc.assistantId2 || pendingDoc.assistantId2 === 'pendiente');
 
-      if (!needsFirst && !needsSecond) return;
+      if (!needsFirst && !needsSecond) continue;
 
       const dbKeyId = needsFirst ? 'assistantId' : 'assistantId2';
       const dbKeyName = needsFirst ? 'assistantName' : 'assistantName2';
@@ -1216,46 +1220,52 @@ const App = () => {
       const requiredSlots = getSlotsForDuration(pendingDoc.time, pendingDoc.duration);
       const dayOfWeek = getDayOfWeek(pendingDoc.date);
 
-      // Encontrar asistentes verdaderamente libres en TODO el rango de la cita
+      // Verificamos qué asistentes están libres según el estado simulado en memoria
       const availableAssistants = assistants.filter(ast => {
-         if (siblingIdValue === ast.id) return false;
+        if (siblingIdValue === ast.id) return false;
 
-         // 1. Debe estar trabajando durante TODOS los slots de la cita
-         const scheduleBlocks = getAssistantScheduleForDay(ast, dayOfWeek);
-         const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, scheduleBlocks));
-         if (!workingAll) return false;
-         
-         // 2. NO debe tener ninguna cita asignada en ese rango horario
-         const bookedInAny = requiredSlots.some(slot => 
-           rawBookings.some(otherDoc => {
-             if (otherDoc.id === pendingDoc.id) return false;
-             if (otherDoc.date !== pendingDoc.date) return false;
-             
-             const otherSlots = getSlotsForDuration(otherDoc.time, otherDoc.duration);
-             const overlaps = otherSlots.includes(slot);
-             if (!overlaps) return false;
-             
-             return (otherDoc.assistantId && otherDoc.assistantId === ast.id) || 
-                    (otherDoc.assistantId2 && otherDoc.assistantId2 === ast.id);
-           })
-         );
+        // 1. Debe estar en turno durante TODOS los slots requeridos
+        const scheduleBlocks = getAssistantScheduleForDay(ast, dayOfWeek);
+        const workingAll = requiredSlots.every(slot => isTimeInAnyBlock(slot, scheduleBlocks));
+        if (!workingAll) return false;
 
-         return !bookedInAny;
+        // 2. Comprobar que NO esté ya ocupada en NINGUNO de los slots en las citas simuladas
+        const bookedInAny = requiredSlots.some(slot => 
+          simulatedBookings.some(otherDoc => {
+            if (otherDoc.id === pendingDoc.id) return false;
+            if (otherDoc.date !== pendingDoc.date) return false;
+
+            const otherSlots = getSlotsForDuration(otherDoc.time, otherDoc.duration);
+            const overlaps = otherSlots.includes(slot);
+            if (!overlaps) return false;
+
+            return (otherDoc.assistantId && otherDoc.assistantId === ast.id) ||
+                   (otherDoc.assistantId2 && otherDoc.assistantId2 === ast.id);
+          })
+        );
+
+        return !bookedInAny;
       });
 
-      // Asignación automática instantánea
       if (availableAssistants.length > 0) {
-         const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
-         
-         updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', pendingDoc.id), {
-             [dbKeyId]: assignedAssistant.id,
-             [dbKeyName]: assignedAssistant.name,
-             last_synced_date: pendingDoc.date,
-             last_synced_time: pendingDoc.time,
-             last_synced_duration: pendingDoc.duration
-         }).catch((err) => console.error("Error auto-assigning:", err));
+        // Asignar asistente
+        const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
+
+        // Actualizar la simulación en memoria INMEDIATAMENTE para que la siguiente cita de este ciclo no la vuelva a elegir
+        pendingDoc[dbKeyId] = assignedAssistant.id;
+        pendingDoc[dbKeyName] = assignedAssistant.name;
+        hasUpdates = true;
+
+        // Enviar actualización a Firebase
+        updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', pendingDoc.id), {
+          [dbKeyId]: assignedAssistant.id,
+          [dbKeyName]: assignedAssistant.name,
+          last_synced_date: pendingDoc.date,
+          last_synced_time: pendingDoc.time,
+          last_synced_duration: pendingDoc.duration
+        }).catch((err) => console.error("Error auto-assigning:", err));
       }
-    });
+    }
   }, [rawBookings, assistants]);
 
   if (loading) return <div className="min-h-screen bg-slate-50 flex items-center justify-center text-blue-600 font-medium">Cargando Sistema...</div>;
