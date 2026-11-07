@@ -1489,7 +1489,15 @@ const App = () => {
 
   // 1. Escuchar estado de autenticación
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (usr) => {
+    const unsubscribe = onAuthStateChanged(auth, async (usr) => {
+      // Si detectamos un usuario anónimo de sesiones anteriores, cerramos esa sesión
+      if (usr && usr.isAnonymous) {
+        await signOut(auth);
+        setCurrentUser(null);
+        setUserProfile(null);
+        setLoading(false);
+        return;
+      }
       setCurrentUser(usr);
       if (!usr) {
         setUserProfile(null);
@@ -1503,7 +1511,6 @@ const App = () => {
   useEffect(() => {
     if (!currentUser) return;
 
-    // Listener perfil usuario actual
     const userDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'users', currentUser.uid);
     const unsubUser = onSnapshot(userDocRef, (snap) => {
       if (snap.exists()) {
@@ -1513,12 +1520,14 @@ const App = () => {
         else if (data.role === 'doctor') setRoleView('doctor');
         else if (data.role === 'assistant') setRoleView('assistant');
       } else {
-        // En caso de que no exista el doc aún
         setUserProfile({ role: 'pendiente', status: 'pending' });
       }
+      setLoading(false);
+    }, (error) => {
+      console.error("Error fetching user profile:", error);
+      setLoading(false);
     });
 
-    // Listener de todos los usuarios para el Admin
     const usersCollRef = collection(db, 'artifacts', appId, 'public', 'data', 'users');
     const unsubUsersList = onSnapshot(usersCollRef, (snap) => {
       setUsersList(snap.docs.map(d => ({ id: d.id, ...d.data() })));
@@ -1597,7 +1606,6 @@ const App = () => {
         }
       });
       setGlobalAgenda(expandedGlobal);
-      setLoading(false);
     });
 
     return () => { unsubAssistants(); unsubDoctors(); unsubBookings(); unsubGlobalAgenda(); unsubRotations(); };
