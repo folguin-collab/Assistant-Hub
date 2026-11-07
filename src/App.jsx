@@ -896,7 +896,8 @@ const DoctorView = ({ assistants, bookings, doctors, rawBookings, userProfile })
           [booking.dbKeyName]: ast.name,
           last_synced_date: booking.date,
           last_synced_time: booking.time,
-          last_synced_duration: booking.duration
+          last_synced_duration: booking.duration,
+          isManual: true // <-- FIJACIÓN MANUAL: Previene sobreescritura automática
         });
         setCardError(prev => ({ ...prev, [booking.virtualId]: '' }));
       } catch (err) {
@@ -930,20 +931,21 @@ const DoctorView = ({ assistants, bookings, doctors, rawBookings, userProfile })
        return;
     }
 
-    const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
+    // Usamos el primero disponible en vez de Math.random() para evitar "saltos" impredecibles en la UI
+    const assignedAssistant = availableAssistants[0];
     try {
       await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id), {
         [booking.dbKeyId]: assignedAssistant.id, 
         [booking.dbKeyName]: assignedAssistant.name,
         last_synced_date: booking.date,
         last_synced_time: booking.time,
-        last_synced_duration: booking.duration
+        last_synced_duration: booking.duration,
+        isManual: false
       });
       setCardError(prev => ({ ...prev, [booking.virtualId]: '' }));
     } catch (err) { console.error("Assign error:", err); }
   };
 
-  // Solo administradores pueden liberar una asistente asignada
   const handleUnassign = async (booking) => {
       if (userProfile?.role !== 'admin') {
         alert("Acción restringida: Solo un Administrador puede liberar a una asistente asignada.");
@@ -952,7 +954,8 @@ const DoctorView = ({ assistants, bookings, doctors, rawBookings, userProfile })
       try {
         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id), {
           [booking.dbKeyId]: 'pendiente', 
-          [booking.dbKeyName]: 'Por Asignar'
+          [booking.dbKeyName]: 'Por Asignar',
+          isManual: false
         });
       } catch (err) { console.error("Unassign error:", err); }
   };
@@ -1052,10 +1055,13 @@ const DoctorView = ({ assistants, bookings, doctors, rawBookings, userProfile })
                          <div className="text-xs opacity-90"><User size={12} className="inline mr-1 opacity-70"/> Px: {mb.patientName}</div>
                          {mb.comments && <div className="text-xs opacity-80 italic flex items-start gap-1"><FileText size={12} className="mt-0.5 flex-shrink-0 opacity-70"/> <span>{mb.comments}</span></div>}
                          
-                         {isUnassigned && mb.isFirstSlot !== false && (
-                           <div className="pt-2 space-y-2">
+                         {/* Selector manual para elegir/cambiar a CUALQUIER asistente, SIEMPRE visible en el primer slot para Doctores/Admin */}
+                         {mb.isFirstSlot !== false && (
+                           <div className="pt-2 space-y-2 border-t border-black/5 mt-2">
                              <div className="space-y-1">
-                               <label className="text-[11px] font-semibold text-slate-600 block">Elegir Asistente Manual:</label>
+                               <label className="text-[11px] font-semibold text-slate-600 block">
+                                 {isUnassigned ? 'Elegir Asistente Manual:' : 'Cambiar Asistente:'}
+                               </label>
                                <select
                                  value={selectedAssistantManual[mb.virtualId] || ''}
                                  onChange={(e) => setSelectedAssistantManual(prev => ({ ...prev, [mb.virtualId]: e.target.value }))}
@@ -1078,7 +1084,7 @@ const DoctorView = ({ assistants, bookings, doctors, rawBookings, userProfile })
                                onClick={() => handleAssignSelectedAssistant(mb)} 
                                className="w-full py-2 bg-blue-600 text-white rounded text-xs font-semibold hover:bg-blue-700 transition-colors shadow-sm flex items-center justify-center gap-1.5"
                              >
-                               <Check size={14} /> Asignar Asistente
+                               <Check size={14} /> {isUnassigned ? 'Asignar' : 'Actualizar'} Asistente
                              </button>
 
                              {cardError[mb.virtualId] && (
@@ -1089,7 +1095,7 @@ const DoctorView = ({ assistants, bookings, doctors, rawBookings, userProfile })
                            </div>
                          )}
                          
-                         {/* SEGURIDAD: Solo el Administrador puede liberar una asistente */}
+                         {/* SEGURIDAD: Solo el Administrador puede liberar una asistente a "Pendiente" */}
                          {!isUnassigned && mb.isFirstSlot !== false && userProfile?.role === 'admin' && (
                            <button 
                              onClick={() => handleUnassign(mb)} 
@@ -1554,7 +1560,8 @@ const App = () => {
         const changedTime = data.last_synced_time && data.last_synced_time !== cleanTimeStr;
         const changedDuration = data.last_synced_duration && data.last_synced_duration !== durationNum;
 
-        if (isAssigned && (changedDate || changedTime || changedDuration)) {
+        // Si la cita no fue fijada manualmente y sufrió un cambio de horario/duración, se resetea la asignación
+        if (isAssigned && !data.isManual && (changedDate || changedTime || changedDuration)) {
              updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', docSnap.id), {
                 assistantId: 'pendiente',
                 assistantName: 'Por Asignar',
@@ -1636,7 +1643,8 @@ const App = () => {
       const needsFirst = !pendingDoc.assistantId || pendingDoc.assistantId === 'pendiente';
       const needsSecond = isDoble && (!pendingDoc.assistantId2 || pendingDoc.assistantId2 === 'pendiente');
 
-      if (!needsFirst && !needsSecond) continue;
+      // Si fue asignado manualmente en algún momento o no necesita asignación, lo omitimos
+      if (pendingDoc.isManual || (!needsFirst && !needsSecond)) continue;
 
       const dbKeyId = needsFirst ? 'assistantId' : 'assistantId2';
       const dbKeyName = needsFirst ? 'assistantName' : 'assistantName2';
@@ -1670,7 +1678,8 @@ const App = () => {
       });
 
       if (availableAssistants.length > 0) {
-        const assignedAssistant = availableAssistants[Math.floor(Math.random() * availableAssistants.length)];
+        // En lugar de aleatorio, usamos el primero libre en la cola determinista
+        const assignedAssistant = availableAssistants[0];
 
         pendingDoc[dbKeyId] = assignedAssistant.id;
         pendingDoc[dbKeyName] = assignedAssistant.name;
@@ -1680,7 +1689,8 @@ const App = () => {
           [dbKeyName]: assignedAssistant.name,
           last_synced_date: pendingDoc.date,
           last_synced_time: pendingDoc.time,
-          last_synced_duration: pendingDoc.duration
+          last_synced_duration: pendingDoc.duration,
+          isManual: false
         }).catch((err) => console.error("Error auto-assigning:", err));
       }
     }
