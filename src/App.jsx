@@ -153,7 +153,6 @@ const AuthScreen = ({ onLoginSuccess }) => {
         const usersRef = collection(db, 'artifacts', appId, 'public', 'data', 'users');
         const snapshot = await getDocs(usersRef);
         
-        // Si es el primer usuario de la app, se crea como Administrador activo
         const isFirstUser = snapshot.empty;
         const initialRole = isFirstUser ? 'admin' : 'pendiente';
         const initialStatus = isFirstUser ? 'active' : 'pending';
@@ -496,7 +495,6 @@ const AdminView = ({ assistants, doctors, rotations, usersList }) => {
     }
   };
 
-  // GESTIÓN DE ROLES DE USUARIOS
   const handleUpdateUserRole = async (userId, newRole) => {
     try {
       await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', userId), {
@@ -884,20 +882,24 @@ const DoctorView = ({ assistants, bookings, doctors, rawBookings, userProfile })
     } catch (err) { console.error("Booking error:", err); }
   };
 
+  // ASIGNACIÓN MANUAL INMUTABLE
   const handleAssignSelectedAssistant = async (booking) => {
     const chosenAstId = selectedAssistantManual[booking.virtualId];
     
+    // Si se seleccionó una asistente específica del desplegable
     if (chosenAstId) {
       const ast = assistants.find(a => a.id === chosenAstId);
       if (!ast) return;
       try {
+        // Encontramos la cita raíz en rawBookings para usar su hora original real
+        const rootDoc = rawBookings.find(r => r.id === booking.id) || booking;
         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id), {
           [booking.dbKeyId]: ast.id, 
           [booking.dbKeyName]: ast.name,
-          last_synced_date: booking.date,
-          last_synced_time: booking.time,
-          last_synced_duration: booking.duration,
-          isManual: true // <-- FIJACIÓN MANUAL: Previene sobreescritura automática
+          last_synced_date: rootDoc.date,
+          last_synced_time: rootDoc.time,
+          last_synced_duration: rootDoc.duration,
+          isManual: true // <-- CANDADO: Nunca será tocada por el motor automático
         });
         setCardError(prev => ({ ...prev, [booking.virtualId]: '' }));
       } catch (err) {
@@ -906,8 +908,10 @@ const DoctorView = ({ assistants, bookings, doctors, rawBookings, userProfile })
       return;
     }
 
-    const requiredSlots = getSlotsForDuration(booking.time, booking.duration);
-    const dayOfWeek = getDayOfWeek(booking.date);
+    // Si pulsó el botón para auto-asignar la primera disponible
+    const rootDoc = rawBookings.find(r => r.id === booking.id) || booking;
+    const requiredSlots = getSlotsForDuration(rootDoc.time, rootDoc.duration);
+    const dayOfWeek = getDayOfWeek(rootDoc.date);
 
     const availableAssistants = assistants.filter(ast => {
        if (booking.siblingIdValue === ast.id) return false;
@@ -918,7 +922,7 @@ const DoctorView = ({ assistants, bookings, doctors, rawBookings, userProfile })
        
        const bookedInAny = requiredSlots.some(slot => rawBookings.some(b => {
          if (b.id === booking.id) return false;
-         if (b.date !== booking.date) return false;
+         if (b.date !== rootDoc.date) return false;
          const otherSlots = getSlotsForDuration(b.time, b.duration);
          return otherSlots.includes(slot) && (b.assistantId === ast.id || b.assistantId2 === ast.id);
        }));
@@ -931,16 +935,15 @@ const DoctorView = ({ assistants, bookings, doctors, rawBookings, userProfile })
        return;
     }
 
-    // Usamos el primero disponible en vez de Math.random() para evitar "saltos" impredecibles en la UI
     const assignedAssistant = availableAssistants[0];
     try {
       await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', booking.id), {
         [booking.dbKeyId]: assignedAssistant.id, 
         [booking.dbKeyName]: assignedAssistant.name,
-        last_synced_date: booking.date,
-        last_synced_time: booking.time,
-        last_synced_duration: booking.duration,
-        isManual: false
+        last_synced_date: rootDoc.date,
+        last_synced_time: rootDoc.time,
+        last_synced_duration: rootDoc.duration,
+        isManual: true // Queda protegida como fijada
       });
       setCardError(prev => ({ ...prev, [booking.virtualId]: '' }));
     } catch (err) { console.error("Assign error:", err); }
@@ -1055,7 +1058,7 @@ const DoctorView = ({ assistants, bookings, doctors, rawBookings, userProfile })
                          <div className="text-xs opacity-90"><User size={12} className="inline mr-1 opacity-70"/> Px: {mb.patientName}</div>
                          {mb.comments && <div className="text-xs opacity-80 italic flex items-start gap-1"><FileText size={12} className="mt-0.5 flex-shrink-0 opacity-70"/> <span>{mb.comments}</span></div>}
                          
-                         {/* Selector manual para elegir/cambiar a CUALQUIER asistente, SIEMPRE visible en el primer slot para Doctores/Admin */}
+                         {/* Selector manual para elegir/cambiar a CUALQUIER asistente, SIEMPRE visible en el primer slot */}
                          {mb.isFirstSlot !== false && (
                            <div className="pt-2 space-y-2 border-t border-black/5 mt-2">
                              <div className="space-y-1">
@@ -1142,7 +1145,6 @@ const AssistantView = ({ assistants, bookings, doctors, globalAgenda, rotations,
   const lastNotifiedHour = useRef('');
   const slots = useMemo(() => generateTimeSlots(8, 20), []);
 
-  // Pre-seleccionar la asistente según su perfil registrado si coincide
   useEffect(() => {
     if (userProfile?.name) {
       const match = assistants.find(a => a.name.toLowerCase().trim() === userProfile.name.toLowerCase().trim());
@@ -1490,7 +1492,6 @@ const App = () => {
   // 1. Escuchar estado de autenticación
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (usr) => {
-      // Si detectamos un usuario anónimo de sesiones anteriores, cerramos esa sesión
       if (usr && usr.isAnonymous) {
         await signOut(auth);
         setCurrentUser(null);
@@ -1536,7 +1537,7 @@ const App = () => {
     return () => { unsubUser(); unsubUsersList(); };
   }, [currentUser]);
 
-  // 3. Cargar datos clínicos generales de Firestore
+  // 3. Cargar datos clínicos generales de Firestore (SIN el loop de reseteo destructivo)
   useEffect(() => {
     if (!currentUser) return;
 
@@ -1555,6 +1556,7 @@ const App = () => {
         const data = docSnap.data();
         const idEstado = Number(data.id_estado);
 
+        // Eliminar si es cancelada/anulada en Dentalink
         if (idEstado === 1 || idEstado === 8 || idEstado === 14 || data.bloqueo_anulado) {
            deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', docSnap.id)).catch(()=>{});
            return;
@@ -1563,27 +1565,15 @@ const App = () => {
         const fechaCorregida = safeFormatDate(data.date);
         const durationNum = Number(data.duration) || 15;
         const cleanTimeStr = formatCleanTime(data.time);
-        
-        const isAssigned = (data.assistantId && data.assistantId !== 'pendiente') || (data.assistantId2 && data.assistantId2 !== 'pendiente');
-        const changedDate = data.last_synced_date && data.last_synced_date !== fechaCorregida;
-        const changedTime = data.last_synced_time && data.last_synced_time !== cleanTimeStr;
-        const changedDuration = data.last_synced_duration && data.last_synced_duration !== durationNum;
 
-        // Si la cita no fue fijada manualmente y sufrió un cambio de horario/duración, se resetea la asignación
-        if (isAssigned && !data.isManual && (changedDate || changedTime || changedDuration)) {
-             updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'bookings', docSnap.id), {
-                assistantId: 'pendiente',
-                assistantName: 'Por Asignar',
-                assistantId2: data.assistantId2 ? 'pendiente' : null,
-                assistantName2: data.assistantName2 ? 'Por Asignar' : null,
-                last_synced_date: fechaCorregida,
-                last_synced_time: cleanTimeStr,
-                last_synced_duration: durationNum
-             }).catch(()=>{});
-             return; 
-        }
-
-        docsList.push({ id: docSnap.id, ...data, time: cleanTimeStr, date: fechaCorregida, duration: durationNum });
+        docsList.push({ 
+          id: docSnap.id, 
+          ...data, 
+          time: cleanTimeStr, 
+          date: fechaCorregida, 
+          duration: durationNum,
+          isManual: data.isManual === true 
+        });
       });
       setRawBookings(docsList);
     });
@@ -1639,7 +1629,7 @@ const App = () => {
     return result;
   }, [rawBookings]);
 
-  // MOTOR DE AUTO-ASIGNACIÓN SIN CONDICIÓN DE CARRERA
+  // MOTOR DE AUTO-ASIGNACIÓN (SOLO PARA CITAS PENDIENTES, NUNCA TOCA CITAS MANUALES NI ASIGNADAS)
   useEffect(() => {
     if (assistants.length === 0 || rawBookings.length === 0) return;
 
@@ -1651,7 +1641,7 @@ const App = () => {
       const needsFirst = !pendingDoc.assistantId || pendingDoc.assistantId === 'pendiente';
       const needsSecond = isDoble && (!pendingDoc.assistantId2 || pendingDoc.assistantId2 === 'pendiente');
 
-      // Si fue asignado manualmente en algún momento o no necesita asignación, lo omitimos
+      // REGLA DE ORO: Si fue asignada manualmente o ya tiene asistente, el robot NO la toca
       if (pendingDoc.isManual || (!needsFirst && !needsSecond)) continue;
 
       const dbKeyId = needsFirst ? 'assistantId' : 'assistantId2';
@@ -1686,7 +1676,6 @@ const App = () => {
       });
 
       if (availableAssistants.length > 0) {
-        // En lugar de aleatorio, usamos el primero libre en la cola determinista
         const assignedAssistant = availableAssistants[0];
 
         pendingDoc[dbKeyId] = assignedAssistant.id;
@@ -1763,7 +1752,6 @@ const App = () => {
           </div>
 
           <div className="flex items-center gap-3">
-            {/* Solo el Administrador puede alternar entre vistas */}
             {userProfile.role === 'admin' ? (
               <div className="hidden sm:flex bg-slate-100 p-1 rounded-lg">
                 <button onClick={() => setRoleView('admin')} className={`px-3 py-1.5 text-xs rounded-md transition-all flex items-center gap-1 ${roleView === 'admin' ? 'bg-white shadow-sm text-blue-700 font-bold' : 'text-slate-600 hover:text-slate-900'}`}><Shield size={14} /> Admin</button>
@@ -1772,7 +1760,6 @@ const App = () => {
               </div>
             ) : null}
 
-            {/* Perfil del usuario conectado */}
             <div className="flex items-center gap-2 border-l border-slate-200 pl-3">
               <div className="text-right hidden sm:block">
                 <p className="text-xs font-bold text-slate-800 leading-tight">{userProfile.name || currentUser.email}</p>
@@ -1794,7 +1781,6 @@ const App = () => {
       </header>
 
       <main className="max-w-6xl mx-auto px-4 py-8">
-        {/* Renderizado condicional estricto por roles */}
         {userProfile.role === 'admin' && (
           <>
             {roleView === 'admin' && <AdminView assistants={assistants} doctors={doctors} rotations={rotations} usersList={usersList} />}
